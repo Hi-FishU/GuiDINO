@@ -6,6 +6,7 @@ from model.positionembedding import PositionEmbeddingSine
 from model.transformer import Transformer
 
 
+
 class DETRHead(nn.Module):
     def __init__(
         self,
