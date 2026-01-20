@@ -42,10 +42,14 @@ class GenericSegmentationDataset(Dataset):
         return len(self.samples)
 
     def _load_image(self, path: Path) -> np.ndarray:
+        if not path.exists():
+            raise FileNotFoundError(f"Image file not found: {path}")
         return np.array(Image.open(path).convert("RGB"))
 
     def _load_mask(self, path: Path) -> np.ndarray:
         # Masks are grayscale; make sure to convert and cast to float
+        if not path.exists():
+            raise FileNotFoundError(f"Mask file not found: {path}")
         return np.array(Image.open(path).convert("L"), dtype=np.float32)
 
     def __getitem__(self, idx: int):
@@ -181,7 +185,8 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             raise ValueError("At least one of drive_root or kvasir_root must be provided")
 
     def setup(self, stage: Optional[str] = None):
-        train_transform = get_segmentation_train_transform(self.image_size)
+        # train_transform = get_segmentation_train_transform(self.image_size)
+        train_transform = get_segmentation_val_transform(self.image_size)
         val_transform = get_segmentation_val_transform(self.image_size)
 
         train_datasets: List[Dataset] = []
@@ -195,7 +200,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
                 train_datasets.append(GenericSegmentationDataset(drive_train, transform=train_transform))
             if drive_val:
                 val_datasets.append(GenericSegmentationDataset(drive_val, transform=val_transform))
-            seed += 1
+            # seed += 1
 
         if self.kvasir_root is not None:
             kvasir_samples = discover_kvasir_samples(self.kvasir_root)

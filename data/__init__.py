@@ -1,7 +1,7 @@
-from . import preprocessing, coco, segmentation
+from . import codebook, preprocessing, segmentation
 
 __all__ = [
+    'codebook',
     'preprocessing',
-    'coco',
     'segmentation',
 ]

@@ -94,14 +94,14 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 batch_size=images.size(0),
             )
 
-        self.log(
-            "val/loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=images.size(0),
-        )
+        # self.log(
+        #     "val/loss",
+        #     loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     batch_size=images.size(0),
+        # )
         return loss
 
     def configure_optimizers(self):
