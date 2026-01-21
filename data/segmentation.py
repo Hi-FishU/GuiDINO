@@ -44,13 +44,21 @@ class GenericSegmentationDataset(Dataset):
     def _load_image(self, path: Path) -> np.ndarray:
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {path}")
-        return np.array(Image.open(path).convert("RGB"))
+        try:
+            with Image.open(path) as img:
+                return np.array(img.convert("RGB"))
+        except Exception as e:
+            raise RuntimeError(f"Failed to open image file {path}: {e}")
 
     def _load_mask(self, path: Path) -> np.ndarray:
-        # Masks are grayscale; make sure to convert and cast to float
+        # Masks are grayscale; make sure to convert and cast to float.
         if not path.exists():
             raise FileNotFoundError(f"Mask file not found: {path}")
-        return np.array(Image.open(path).convert("L"), dtype=np.float32)
+        try:
+            with Image.open(path) as mask_img:
+                return np.array(mask_img.convert("L"), dtype=np.float32)
+        except Exception as e:
+            raise RuntimeError(f"Failed to open mask file {path}: {e}")
 
     def __getitem__(self, idx: int):
         sample = self.samples[idx]
@@ -184,14 +192,18 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         if drive_root is None and kvasir_root is None:
             raise ValueError("At least one of drive_root or kvasir_root must be provided")
 
+        if drive_root is not None and kvasir_root is not None:
+            raise ValueError("Only one of drive_root or kvasir_root can be provided at a time")
+
     def setup(self, stage: Optional[str] = None):
-        # train_transform = get_segmentation_train_transform(self.image_size)
-        train_transform = get_segmentation_val_transform(self.image_size)
+        train_transform = get_segmentation_train_transform(self.image_size)
+        # train_transform = get_segmentation_val_transform(self.image_size)
         val_transform = get_segmentation_val_transform(self.image_size)
 
         train_datasets: List[Dataset] = []
         val_datasets: List[Dataset] = []
         seed = self.seed
+
 
         if self.drive_root is not None:
             drive_samples = discover_drive_samples(self.drive_root, split="training", use_manual=True)
@@ -219,6 +231,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             self.val_dataset = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
 
     def train_dataloader(self) -> DataLoader:
+        multiprocessing_context = "spawn" if self.num_workers > 0 else None
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -226,11 +239,13 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
+            multiprocessing_context=multiprocessing_context,
         )
 
     def val_dataloader(self) -> Optional[DataLoader]:
         if self.val_dataset is None:
             return None
+        multiprocessing_context = "spawn" if self.num_workers > 0 else None
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
@@ -238,5 +253,5 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
+            multiprocessing_context=multiprocessing_context,
         )
-

@@ -27,7 +27,11 @@ class MedTokenSegLightningModule(pl.LightningModule):
         criterion: Any,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
+        momentum: float = 0.99,
+        nesterov: bool = True,
         threshold: float = 0.5,
+        max_epochs: int = 1000,
+        poly_power: float = 0.9,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "criterion"])
@@ -35,7 +39,11 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.criterion = criterion
         self.lr = lr
         self.weight_decay = weight_decay
+        self.momentum = momentum
+        self.nesterov = nesterov
         self.threshold = threshold
+        self.max_epochs = max_epochs
+        self.poly_power = poly_power
 
     def forward(self, images: torch.Tensor, targets: Optional[torch.Tensor] = None):
         if targets is not None:
@@ -58,14 +66,14 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 prog_bar=False,
                 batch_size=images.size(0),
             )
-        self.log(
-            "train/loss",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=images.size(0),
-        )
+        # self.log(
+        #     "train/loss",
+        #     loss,
+        #     on_step=True,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     batch_size=images.size(0),
+        # )
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -108,9 +116,17 @@ class MedTokenSegLightningModule(pl.LightningModule):
         param_dicts = [
             {"params": [p for p in self.model.parameters() if p.requires_grad]},
         ]
-        optimizer = SGD(param_dicts, lr=self.lr, weight_decay=self.weight_decay)
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=10, T_mult=2
+        optimizer = SGD(
+            param_dicts,
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+            momentum=self.momentum,
+            nesterov=self.nesterov,
+        )
+        max_epochs = max(self.max_epochs, 1)
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda epoch: (1 - epoch / max_epochs) ** self.poly_power,
         )
         return {
             "optimizer": optimizer,
