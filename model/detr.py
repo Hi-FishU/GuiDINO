@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from model.backbone import DINOv3BackboneWrapper
+from model.dinov3_backbone import DINOv3BackboneWrapper
 from model.positionembedding import PositionEmbeddingSine
 from model.transformer import Transformer
 

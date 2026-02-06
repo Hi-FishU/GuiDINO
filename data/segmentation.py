@@ -14,6 +14,8 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from data.preprocessing import (
     get_segmentation_train_transform,
     get_segmentation_val_transform,
+    get_segmentation_train_transform_dino,
+    get_segmentation_val_transform_dino,
 )
 
 
@@ -176,6 +178,8 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         seed: int = 0,
         pin_memory: bool = True,
         persistent_workers: bool = True,
+        prefetch_factor: int = 2,
+        preprocessing: str = "nnunet",
     ):
         super().__init__()
         self.drive_root = drive_root
@@ -188,6 +192,8 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.seed = seed
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
+        self.prefetch_factor = prefetch_factor
+        self.preprocessing = preprocessing
 
         if drive_root is None and kvasir_root is None:
             raise ValueError("At least one of drive_root or kvasir_root must be provided")
@@ -196,9 +202,12 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             raise ValueError("Only one of drive_root or kvasir_root can be provided at a time")
 
     def setup(self, stage: Optional[str] = None):
-        train_transform = get_segmentation_train_transform(self.image_size)
-        # train_transform = get_segmentation_val_transform(self.image_size)
-        val_transform = get_segmentation_val_transform(self.image_size)
+        if self.preprocessing == "dino":
+            train_transform = get_segmentation_train_transform_dino(self.image_size)
+            val_transform = get_segmentation_val_transform_dino(self.image_size)
+        else:
+            train_transform = get_segmentation_train_transform(self.image_size)
+            val_transform = get_segmentation_val_transform(self.image_size)
 
         train_datasets: List[Dataset] = []
         val_datasets: List[Dataset] = []
@@ -232,6 +241,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         multiprocessing_context = "spawn" if self.num_workers > 0 else None
+        prefetch_factor = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -239,6 +249,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
+            prefetch_factor=prefetch_factor,
             multiprocessing_context=multiprocessing_context,
         )
 
@@ -246,6 +257,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         if self.val_dataset is None:
             return None
         multiprocessing_context = "spawn" if self.num_workers > 0 else None
+        prefetch_factor = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
@@ -253,5 +265,6 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
+            prefetch_factor=prefetch_factor,
             multiprocessing_context=multiprocessing_context,
         )

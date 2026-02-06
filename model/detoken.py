@@ -10,7 +10,7 @@ from sklearn.decomposition import IncrementalPCA
 from torch import nn
 
 from data.codebook import CodebookConfig
-from model.backbone import DINOv3BackboneWrapper
+from model.dinov3_backbone import DINOv3BackboneWrapper
 from model.positionembedding import PositionEmbeddingSine
 from utils.codebook_tool import (iter_images_from_loader, l2_normalize,
                                  top_p_mean)

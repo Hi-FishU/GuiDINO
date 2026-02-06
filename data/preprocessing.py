@@ -50,6 +50,7 @@ def get_val_transform():
 
 
 def get_segmentation_train_transform(image_size=512):
+    """nnUNet-style preprocessing/augmentation (kept as default)."""
     height, width = _resolve_hw(image_size)
     return A.Compose([
         A.HorizontalFlip(p=0.5),
@@ -68,9 +69,38 @@ def get_segmentation_train_transform(image_size=512):
 
 
 def get_segmentation_val_transform(image_size=512):
+    """nnUNet-style preprocessing/validation (kept as default)."""
     height, width = _resolve_hw(image_size)
     return A.Compose([
         A.Resize(height, width),
         A.Lambda(image=_zscore_image),
+        ToTensorV2(),
+    ])
+
+
+def get_segmentation_train_transform_dino(image_size=256):
+    """SegDINO-style preprocessing (ImageNet normalization, no augmentation)."""
+    height, width = _resolve_hw(image_size)
+    return A.Compose([
+        A.Resize(height, width),
+        A.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
+    ])
+
+
+def get_segmentation_val_transform_dino(image_size=256):
+    """SegDINO-style validation preprocessing."""
+    height, width = _resolve_hw(image_size)
+    return A.Compose([
+        A.Resize(height, width),
+        A.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            max_pixel_value=255.0,
+        ),
         ToTensorV2(),
     ])

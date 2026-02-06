@@ -18,7 +18,7 @@ class DINOv3BackboneWrapper(nn.Module):
         )
         self.embed_dim = self.backbone.config.hidden_size
         self.patch_size = self.backbone.config.patch_size
-        self.num_register_tokens = self.backbone.config.num_register_tokens
+        self.num_register_tokens = getattr(self.backbone.config, "num_register_tokens", 0)
 
         if not train_backbone:
             for p in self.backbone.parameters():
@@ -27,17 +27,22 @@ class DINOv3BackboneWrapper(nn.Module):
         # 1x1 conv to map backbone dim -> transformer hidden dim will be added in the head
         # (kept out here to keep this wrapper generic)
 
+    def _strip_special_tokens(self, x, img_h, img_w):
+        tokens = (img_h // self.patch_size) * (img_w // self.patch_size)
+        if x.shape[1] > tokens:
+            if self.num_register_tokens > 0:
+                return x[:, 1:-self.num_register_tokens, :]
+            return x[:, 1:, :]
+        return x
+
     @torch.no_grad()
     def _tokens_to_map(self, x, img_h, img_w):
         """
         x: (B, HW or 1+HW, C). If CLS present, it's first token.
         Returns feature map (B, C, H, W).
         """
-        B, N, C = x.shape
-        # drop CLS if present
-        if N > (img_h // self.patch_size) * (img_w // self.patch_size):
-            x = x[:, 1:-self.num_register_tokens, :]  # remove CLS
-
+        B, _, C = x.shape
+        x = self._strip_special_tokens(x, img_h, img_w)
         H = img_h // self.patch_size
         W = img_w // self.patch_size
         x = x.transpose(1, 2).contiguous()  # (B, C, HW)
@@ -62,3 +67,17 @@ class DINOv3BackboneWrapper(nn.Module):
         mask = torch.zeros(
             (B, feat.shape[-2], feat.shape[-1]), dtype=torch.bool, device=feat.device)
         return feat, mask
+
+    def get_intermediate_layers(self, images: torch.Tensor, n):
+        """
+        Return intermediate token features at the specified block indices.
+        """
+        B, _, H, W = images.shape
+        outputs = self.backbone(images, output_hidden_states=True)
+        hidden_states = outputs.hidden_states
+        features = []
+        for idx in n:
+            state = hidden_states[idx + 1]
+            state = self._strip_special_tokens(state, H, W)
+            features.append(state)
+        return features

@@ -297,3 +297,19 @@ class DC_and_topk_loss(nn.Module):
             self.ignore_label is None or num_fg > 0) else 0
 
         return self.weight_ce * ce_loss + self.weight_dice * dc_loss
+
+class Guide_DC_and_BCE_loss(DC_and_BCE_loss):
+    def __init__(self, bce_kwargs, soft_dice_kwargs, weight_ce=1, weight_dice=1, use_ignore_label: bool = False,
+                 dice_class=MemoryEfficientSoftDiceLoss, weight_guide=1):
+        super().__init__(bce_kwargs, soft_dice_kwargs, weight_ce, weight_dice, use_ignore_label, dice_class)
+        self.weight_guide = weight_guide
+
+    def forward(self, net_output: Tensor, target: Tensor, guide_mask: Tensor) -> Tensor:
+        loss = super().forward(net_output, target)
+        if guide_mask is not None:
+            guide_mask = guide_mask.float()
+            target_resize = nn.functional.interpolate(target.float(), size=guide_mask.shape[2:], mode='nearest')
+            guide_loss = nn.functional.mse_loss(guide_mask, target_resize, reduction='mean')
+            loss += self.weight_guide * guide_loss
+        return loss
+        return loss
