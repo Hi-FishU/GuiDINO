@@ -3,7 +3,7 @@ addict==2.4.0
 aiohttp==3.12.15
 albumentations==2.0.8
 bbox-visualizer2==0.0.4
-dinov3==0.0.1
+# dinov3==0.0.1
 easydict==1.13
 exceptiongroup==1.3.0
 img2pdf==0.6.1
