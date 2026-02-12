@@ -458,7 +458,7 @@ class GuideWNet2D(nn.Module):
             mask[torch.arange(bsz, device=tokens.device), rand_idx] = True
         return mask
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor | List[torch.Tensor], torch.Tensor]:
         guide_input = self._guide_input(x)
         if self.guide_backbone_train:
             guide_feat, _ = self.guide_backbone(guide_input)
@@ -479,6 +479,6 @@ class GuideWNet2D(nn.Module):
         guided_x = x * guide_for_input
 
         logits = self.wnet(guided_x)
-        if isinstance(logits, (list, tuple)):
-            logits = logits[0]
+        if isinstance(logits, tuple):
+            logits = list(logits)
         return logits, guide

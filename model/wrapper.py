@@ -54,6 +54,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
         val_sw_mirror_axes: Tuple[int, ...] = (0, 1),
         val_sw_gaussian_sigma_scale: float = 1.0 / 8.0,
         val_sw_gaussian_value_scaling: float = 10.0,
+        eval_keep_largest_component: bool = False,
+        surface_metric_spacing: Optional[Tuple[float, float]] = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "criterion"])
@@ -87,6 +89,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.val_sw_mirror_axes = tuple(sorted(set(int(a) for a in val_sw_mirror_axes)))
         self.val_sw_gaussian_sigma_scale = float(val_sw_gaussian_sigma_scale)
         self.val_sw_gaussian_value_scaling = float(val_sw_gaussian_value_scaling)
+        self.eval_keep_largest_component = bool(eval_keep_largest_component)
+        self.surface_metric_spacing = surface_metric_spacing
         self._val_gaussian_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
 
     def forward(self, images: torch.Tensor, targets: Optional[torch.Tensor] = None):
@@ -373,13 +377,38 @@ class MedTokenSegLightningModule(pl.LightningModule):
         if (
             isinstance(outputs, (list, tuple))
             and len(outputs) == 2
-            and torch.is_tensor(outputs[0])
+            and (
+                torch.is_tensor(outputs[0])
+                or (
+                    isinstance(outputs[0], (list, tuple))
+                    and len(outputs[0]) > 0
+                    and all(torch.is_tensor(o) for o in outputs[0])
+                )
+            )
         ):
             logits, guide_mask = outputs
-            try:
-                raw_loss = self.criterion(logits, targets, guide_mask)
-            except TypeError:
-                raw_loss = self.criterion(logits, targets)
+            if isinstance(logits, (list, tuple)):
+                ds_losses = self._compute_deep_supervision_loss(logits, targets, guide_mask=None)
+                main_logits = logits[0]
+                try:
+                    guide_total = self._to_tensor(self.criterion(main_logits, targets, guide_mask))
+                except TypeError:
+                    guide_total = self._to_tensor(self.criterion(main_logits, targets))
+                # Keep DS optimization while adding only the guide-specific part from the main head.
+                ds_main = ds_losses.get("ds_loss_0")
+                if ds_main is not None:
+                    ds_main = self._to_tensor(ds_main)
+                    guide_only = guide_total - ds_main
+                    ds_losses["guide_loss"] = guide_only
+                    total_ds_loss = torch.stack(list(ds_losses.values())).sum()
+                    ds_losses["loss"] = total_ds_loss
+                    return ds_losses, total_ds_loss
+                raw_loss = guide_total
+            else:
+                try:
+                    raw_loss = self.criterion(logits, targets, guide_mask)
+                except TypeError:
+                    raw_loss = self.criterion(logits, targets)
         elif (
             isinstance(outputs, (list, tuple))
             and len(outputs) > 0
@@ -402,7 +431,10 @@ class MedTokenSegLightningModule(pl.LightningModule):
         return {"loss": tensor_loss}, tensor_loss
 
     def _compute_deep_supervision_loss(
-        self, outputs: list[torch.Tensor] | tuple[torch.Tensor, ...], targets: torch.Tensor
+        self,
+        outputs: list[torch.Tensor] | tuple[torch.Tensor, ...],
+        targets: torch.Tensor,
+        guide_mask: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
         num_outputs = len(outputs)
         weights = [1.0 / (2 ** i) for i in range(num_outputs)]
@@ -412,7 +444,11 @@ class MedTokenSegLightningModule(pl.LightningModule):
         loss_dict: Dict[str, torch.Tensor] = {}
         for idx, (logits, weight) in enumerate(zip(outputs, weights)):
             target_level = self._resize_target_to_logits(targets, logits)
-            component = self._to_tensor(self.criterion(logits, target_level)) * weight
+            try:
+                raw_component = self.criterion(logits, target_level, guide_mask)
+            except TypeError:
+                raw_component = self.criterion(logits, target_level)
+            component = self._to_tensor(raw_component) * weight
             loss_dict[f"ds_loss_{idx}"] = component
         return loss_dict
 
@@ -623,6 +659,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
         preds_bin = self._binarize_predictions(preds)
         targets_bin = (targets > 0.5).float()
+        if self.eval_keep_largest_component:
+            preds_bin = self._keep_largest_component_batch(preds_bin)
 
         intersection = (preds_bin * targets_bin).sum(dim=(1, 2, 3))
         pred_area = preds_bin.sum(dim=(1, 2, 3))
@@ -634,19 +672,43 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
         hd95_list: List[float] = []
         asd_list: List[float] = []
+        hd95_nonempty_list: List[float] = []
+        asd_nonempty_list: List[float] = []
         preds_np = preds_bin.cpu().numpy()
         targets_np = targets_bin.cpu().numpy()
         for pred_mask, target_mask in zip(preds_np, targets_np):
-            hd95, asd = self._surface_metrics(pred_mask[0], target_mask[0])
+            hd95, asd = self._surface_metrics(
+                pred_mask[0],
+                target_mask[0],
+                spacing=self.surface_metric_spacing,
+            )
             hd95_list.append(hd95)
             asd_list.append(asd)
+            pred_has_fg = bool(pred_mask[0].astype(bool).sum() > 0)
+            target_has_fg = bool(target_mask[0].astype(bool).sum() > 0)
+            if pred_has_fg and target_has_fg:
+                hd95_nonempty_list.append(hd95)
+                asd_nonempty_list.append(asd)
 
         device = preds.device
+        hd95_all = float(np.mean(hd95_list)) if hd95_list else 0.0
+        asd_all = float(np.mean(asd_list)) if asd_list else 0.0
+        if hd95_nonempty_list:
+            hd95_nonempty = float(np.mean(hd95_nonempty_list))
+            asd_nonempty = float(np.mean(asd_nonempty_list))
+        else:
+            hd95_nonempty = hd95_all
+            asd_nonempty = asd_all
         metrics = {
             "dice": dice.mean(),
             "jaccard": jaccard.mean(),
-            "hd95": torch.as_tensor(np.mean(hd95_list), device=device, dtype=torch.float32),
-            "asd": torch.as_tensor(np.mean(asd_list), device=device, dtype=torch.float32),
+            "hd95": torch.as_tensor(hd95_nonempty, device=device, dtype=torch.float32),
+            "asd": torch.as_tensor(asd_nonempty, device=device, dtype=torch.float32),
+            "hd95_all": torch.as_tensor(hd95_all, device=device, dtype=torch.float32),
+            "asd_all": torch.as_tensor(asd_all, device=device, dtype=torch.float32),
+            "hd95_nonempty": torch.as_tensor(hd95_nonempty, device=device, dtype=torch.float32),
+            "asd_nonempty": torch.as_tensor(asd_nonempty, device=device, dtype=torch.float32),
+            "surface_nonempty_count": torch.as_tensor(float(len(hd95_nonempty_list)), device=device, dtype=torch.float32),
         }
         return metrics
 
@@ -658,20 +720,56 @@ class MedTokenSegLightningModule(pl.LightningModule):
         probs = torch.sigmoid(preds)
         return (probs > self.threshold).float()
 
-    def _surface_metrics(self, pred: np.ndarray, target: np.ndarray) -> Tuple[float, float]:
+    def _keep_largest_component_batch(self, preds_bin: torch.Tensor) -> torch.Tensor:
+        if preds_bin.dim() != 4 or preds_bin.size(1) != 1:
+            return preds_bin
+        preds_np = preds_bin.detach().cpu().numpy().astype(np.uint8)
+        processed: List[np.ndarray] = []
+        for pred in preds_np:
+            processed.append(self._keep_largest_component_2d(pred[0])[None, ...])
+        processed_np = np.stack(processed, axis=0).astype(np.float32)
+        return torch.from_numpy(processed_np).to(device=preds_bin.device, dtype=preds_bin.dtype)
+
+    def _keep_largest_component_2d(self, mask: np.ndarray) -> np.ndarray:
+        try:
+            from scipy.ndimage import label
+        except Exception:
+            return mask.astype(np.uint8)
+        labeled, num = label(mask.astype(bool))
+        if num <= 1:
+            return mask.astype(np.uint8)
+        counts = np.bincount(labeled.ravel())
+        counts[0] = 0
+        keep = counts.argmax()
+        return (labeled == keep).astype(np.uint8)
+
+    def _surface_metrics(
+        self,
+        pred: np.ndarray,
+        target: np.ndarray,
+        spacing: Optional[Tuple[float, float]] = None,
+    ) -> Tuple[float, float]:
         pred_bool = pred.astype(bool)
         target_bool = target.astype(bool)
         if pred_bool.sum() == 0 and target_bool.sum() == 0:
             return 0.0, 0.0
         if pred_bool.sum() == 0 or target_bool.sum() == 0:
-            diag = float(np.sqrt(pred.shape[0] ** 2 + pred.shape[1] ** 2))
+            if spacing is None:
+                diag = float(np.sqrt(pred.shape[0] ** 2 + pred.shape[1] ** 2))
+            else:
+                diag = float(
+                    np.sqrt(
+                        (pred.shape[0] * float(spacing[0])) ** 2
+                        + (pred.shape[1] * float(spacing[1])) ** 2
+                    )
+                )
             return diag, diag
 
         pred_border = pred_bool ^ binary_erosion(pred_bool)
         target_border = target_bool ^ binary_erosion(target_bool)
 
-        dt_pred = distance_transform_edt(~pred_bool)
-        dt_target = distance_transform_edt(~target_bool)
+        dt_pred = distance_transform_edt(~pred_bool, sampling=spacing)
+        dt_target = distance_transform_edt(~target_bool, sampling=spacing)
 
         surface_distances: List[np.ndarray] = []
         dist_target_to_pred = dt_pred[target_border]

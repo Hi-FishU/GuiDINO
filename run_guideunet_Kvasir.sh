@@ -13,4 +13,4 @@ python train.py \
   --log-image-samples 2 \
   --log-image-every-n-epochs 1 \
   --no-train-epoch-eval \
-  --lr-scheduler cosine_restart \
+  --lr-scheduler cosine_restart

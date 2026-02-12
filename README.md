@@ -37,3 +37,17 @@ python predict.py \
 	--synapse-target-spacing 1.0 1.0 1.0 \
 	--patch-size 256 256
 ```
+
+## Offline Evaluation (Dice/IoU + ASD/HD95)
+
+Use `evaluate_offline.py` to evaluate saved prediction masks against GT with optional nnUNet-style postprocessing selection.
+
+```bash
+python evaluate_offline.py \
+	--pred-dir data_source/Kvasir/images \
+	--kvasir-root data_source/Kvasir \
+	--auto-postprocess-largest \
+	--surface-empty-policy penalize \
+	--surface-aggregation nonempty \
+	--output-json outputs/kvasir_summary_boundary.json
+```

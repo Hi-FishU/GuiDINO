@@ -11,4 +11,4 @@ python train.py \
 	--weight-decay 3e-5 \
 	--optimizer sgd \
 	--no-train-epoch-eval \
-	--no-amp \
+	--no-amp

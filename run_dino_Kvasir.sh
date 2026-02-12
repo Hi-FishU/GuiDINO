@@ -7,4 +7,4 @@ python train.py \
   --loss dc_bce \
   --max-epochs 2000 \
   --image-size 256 \
-  --seg-preprocess dino_strong \
+  --seg-preprocess dino_strong

@@ -12,7 +12,9 @@ python train.py \
   --optimizer sgd \
   --lr 1e-2 \
   --weight-decay 3e-5 \
+  --dice-do-bg \
   --weight-guide 0.1 \
   --tokenbook-sample-rate 1.0 \
   --tokenbook-dropout 0.0 \
+  --nnwnet-deep-supervision \
   --no-train-epoch-eval

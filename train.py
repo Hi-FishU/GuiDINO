@@ -187,6 +187,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--best-metric", type=str, default="val/dice")
     parser.add_argument("--best-metric-mode", choices=["max", "min"], default="max")
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--eval-keep-largest-component", action="store_true", default=False)
+    parser.add_argument("--surface-metric-spacing", type=float, nargs=2, default=None)
     parser.add_argument("--weight-ce", type=float, default=1.0)
     parser.add_argument("--weight-dice", type=float, default=1.0)
     parser.add_argument("--weight-guide", type=float, default=0.1)
@@ -455,6 +457,8 @@ def main() -> None:
         val_sw_mirror_axes=tuple(sorted(set(args.val_sw_mirror_axes))),
         val_sw_gaussian_sigma_scale=args.val_sw_gaussian_sigma_scale,
         val_sw_gaussian_value_scaling=args.val_sw_gaussian_value_scaling,
+        eval_keep_largest_component=args.eval_keep_largest_component,
+        surface_metric_spacing=tuple(args.surface_metric_spacing) if args.surface_metric_spacing else None,
     )
 
     data_module = MedTokenSegmentationDataModule(
