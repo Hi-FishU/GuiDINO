@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .dinov3_backbone import DINOv3BackboneWrapper
+from .tokenbook import TokenBook
 
 
 class DropPath(nn.Module):
@@ -380,3 +383,102 @@ class WNet2D(nn.Module):
         if self.deep_supervised:
             return outputs
         return outputs[0]
+
+
+class GuideWNet2D(nn.Module):
+    def __init__(
+        self,
+        in_channel: int,
+        num_classes: int,
+        deep_supervised: bool = False,
+        layer_channel: List[int] | None = None,
+        global_dim: List[int] | None = None,
+        num_heads: List[int] | None = None,
+        sr_ratio: List[int] | None = None,
+        guide_backbone_name: str = "facebook/dinov3-vit7b16-pretrain-lvd1689m",
+        guide_backbone_train: bool = False,
+        tokenbook_tokens: int | None = None,
+        tokenbook_image_size: int | None = None,
+        tokenbook_dropout: float = 0.0,
+        tokenbook_sample_rate: float = 1.0,
+        tokenbook_ema_decay: float | None = None,
+        tokenbook_use_ema: bool = False,
+    ) -> None:
+        super().__init__()
+        self.guide_backbone_train = bool(guide_backbone_train)
+        self.tokenbook_sample_rate = float(tokenbook_sample_rate)
+
+        self.wnet = WNet2D(
+            in_channel=in_channel,
+            num_classes=num_classes,
+            deep_supervised=deep_supervised,
+            layer_channel=layer_channel,
+            global_dim=global_dim,
+            num_heads=num_heads,
+            sr_ratio=sr_ratio,
+        )
+        self.guide_backbone = DINOv3BackboneWrapper(
+            backbone=guide_backbone_name,
+            train_backbone=guide_backbone_train,
+        )
+
+        if tokenbook_tokens is None:
+            if tokenbook_image_size is None:
+                raise ValueError("tokenbook_tokens or tokenbook_image_size must be provided.")
+            patch = self.guide_backbone.patch_size
+            if tokenbook_image_size % patch != 0:
+                raise ValueError(
+                    f"tokenbook_image_size {tokenbook_image_size} must be divisible by patch_size {patch}."
+                )
+            grid = tokenbook_image_size // patch
+            tokenbook_tokens = grid * grid
+
+        self.tokenbook = TokenBook(
+            n_tokens=tokenbook_tokens,
+            embed_dim=self.guide_backbone.embed_dim,
+            dropout=tokenbook_dropout,
+            ema_decay=tokenbook_ema_decay,
+            use_ema=tokenbook_use_ema,
+        )
+
+    def _guide_input(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] == 3:
+            return x
+        if x.shape[1] == 1:
+            return x.repeat(1, 3, 1, 1)
+        return x[:, :3]
+
+    def _token_sample_mask(self, tokens: torch.Tensor) -> torch.Tensor | None:
+        if self.tokenbook_sample_rate >= 1.0:
+            return None
+        bsz, length, _ = tokens.shape
+        mask = torch.rand(bsz, length, device=tokens.device) < self.tokenbook_sample_rate
+        if mask.sum(dim=1).min().item() == 0:
+            rand_idx = torch.randint(0, length, (bsz,), device=tokens.device)
+            mask[torch.arange(bsz, device=tokens.device), rand_idx] = True
+        return mask
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        guide_input = self._guide_input(x)
+        if self.guide_backbone_train:
+            guide_feat, _ = self.guide_backbone(guide_input)
+        else:
+            with torch.no_grad():
+                guide_feat, _ = self.guide_backbone(guide_input)
+
+        patch_h, patch_w = guide_feat.shape[-2:]
+        tokens = guide_feat.flatten(2).transpose(1, 2)
+        token_mask = self._token_sample_mask(tokens)
+        guide = self.tokenbook(tokens, height=patch_h, width=patch_w, token_mask=token_mask)
+
+        guide_for_input = guide
+        if guide_for_input.shape[-2:] != x.shape[-2:]:
+            guide_for_input = F.interpolate(
+                guide_for_input, size=x.shape[-2:], mode="bilinear", align_corners=False
+            )
+        guided_x = x * guide_for_input
+
+        logits = self.wnet(guided_x)
+        if isinstance(logits, (list, tuple)):
+            logits = logits[0]
+        return logits, guide

@@ -14,8 +14,10 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from data.preprocessing import (
     get_segmentation_train_transform,
     get_segmentation_val_transform,
+    get_segmentation_val_transform_fullres,
     get_segmentation_train_transform_dino,
     get_segmentation_val_transform_dino,
+    get_segmentation_val_transform_dino_fullres,
     get_segmentation_train_transform_dino_strong,
 )
 
@@ -470,6 +472,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         preprocessing: str = "nnunet",
         patch_size: int | Tuple[int, int] | None = None,
         oversample_foreground_prob: float = 0.33,
+        full_res_val_eval: bool = False,
     ):
         super().__init__()
         self.drive_root = drive_root
@@ -494,6 +497,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.preprocessing = preprocessing
         self.patch_size = patch_size
         self.oversample_foreground_prob = float(oversample_foreground_prob)
+        self.full_res_val_eval = bool(full_res_val_eval)
 
         dataset_roots = [root is not None for root in (drive_root, kvasir_root, synapse_root)]
         if sum(dataset_roots) == 0:
@@ -507,13 +511,22 @@ class MedTokenSegmentationDataModule(LightningDataModule):
 
         if self.preprocessing == "dino":
             train_transform = get_segmentation_train_transform_dino(train_transform_size)
-            val_transform = get_segmentation_val_transform_dino(val_transform_size)
+            if self.full_res_val_eval:
+                val_transform = get_segmentation_val_transform_dino_fullres()
+            else:
+                val_transform = get_segmentation_val_transform_dino(val_transform_size)
         elif self.preprocessing == "dino_strong":
             train_transform = get_segmentation_train_transform_dino_strong(train_transform_size)
-            val_transform = get_segmentation_val_transform_dino(val_transform_size)
+            if self.full_res_val_eval:
+                val_transform = get_segmentation_val_transform_dino_fullres()
+            else:
+                val_transform = get_segmentation_val_transform_dino(val_transform_size)
         else:
             train_transform = get_segmentation_train_transform(train_transform_size)
-            val_transform = get_segmentation_val_transform(val_transform_size)
+            if self.full_res_val_eval:
+                val_transform = get_segmentation_val_transform_fullres()
+            else:
+                val_transform = get_segmentation_val_transform(val_transform_size)
 
         train_datasets: List[Dataset] = []
         val_datasets: List[Dataset] = []
@@ -628,7 +641,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         prefetch_factor = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
+            batch_size=1 if self.full_res_val_eval else self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -46,6 +47,13 @@ class MedTokenSegLightningModule(pl.LightningModule):
         train_epoch_eval: bool = True,
         log_image_samples: int = 0,
         log_image_every_n_epochs: int = 1,
+        val_use_sliding_window: bool = False,
+        val_sw_patch_size: Tuple[int, int] = (512, 512),
+        val_sw_overlap: float = 0.5,
+        val_sw_mirror: bool = True,
+        val_sw_mirror_axes: Tuple[int, ...] = (0, 1),
+        val_sw_gaussian_sigma_scale: float = 1.0 / 8.0,
+        val_sw_gaussian_value_scaling: float = 10.0,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "criterion"])
@@ -72,6 +80,14 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.log_image_samples = int(log_image_samples)
         self.log_image_every_n_epochs = max(int(log_image_every_n_epochs), 1)
         self.best_metric_value: Optional[float] = None
+        self.val_use_sliding_window = bool(val_use_sliding_window)
+        self.val_sw_patch_size = (int(val_sw_patch_size[0]), int(val_sw_patch_size[1]))
+        self.val_sw_overlap = float(val_sw_overlap)
+        self.val_sw_mirror = bool(val_sw_mirror)
+        self.val_sw_mirror_axes = tuple(sorted(set(int(a) for a in val_sw_mirror_axes)))
+        self.val_sw_gaussian_sigma_scale = float(val_sw_gaussian_sigma_scale)
+        self.val_sw_gaussian_value_scaling = float(val_sw_gaussian_value_scaling)
+        self._val_gaussian_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
 
     def forward(self, images: torch.Tensor, targets: Optional[torch.Tensor] = None):
         if targets is not None:
@@ -86,6 +102,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
         outputs = self(images, targets)
         loss_dict, loss = self._compute_loss(outputs, targets)
         for name, value in loss_dict.items():
+            if name == "loss":
+                continue
             self.log(
                 f"train/{name}",
                 value,
@@ -94,24 +112,40 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 prog_bar=False,
                 batch_size=images.size(0),
             )
-        # self.log(
-        #     "train/loss",
-        #     loss,
-        #     on_step=True,
-        #     on_epoch=True,
-        #     prog_bar=True,
-        #     batch_size=images.size(0),
-        # )
+        self.log(
+            "train/loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=images.size(0),
+        )
+        if not torch.isfinite(loss):
+            self.log(
+                "train/non_finite_loss",
+                torch.as_tensor(1.0, device=self.device),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=images.size(0),
+            )
         return loss
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
-        outputs = self(images, targets)
-        loss_dict, loss = self._compute_loss(outputs, targets)
-        pred_masks = self._extract_pred_masks(outputs)
+        if self.val_use_sliding_window:
+            pred_masks = self._sliding_window_predict_batch(images)
+            loss_dict, loss = self._compute_loss(pred_masks, targets)
+            outputs: Any = pred_masks
+        else:
+            outputs = self(images, targets)
+            loss_dict, loss = self._compute_loss(outputs, targets)
+            pred_masks = self._extract_pred_masks(outputs)
         metrics = self._compute_segmentation_metrics(pred_masks, targets)
 
         for name, value in loss_dict.items():
+            if name == "loss":
+                continue
             self.log(
                 f"val/{name}",
                 value,
@@ -130,14 +164,23 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 batch_size=images.size(0),
             )
 
-        # self.log(
-        #     "val/loss",
-        #     loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=True,
-        #     batch_size=images.size(0),
-        # )
+        self.log(
+            "val/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=images.size(0),
+        )
+        if not torch.isfinite(loss):
+            self.log(
+                "val/non_finite_loss",
+                torch.as_tensor(1.0, device=self.device),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=images.size(0),
+            )
         if self._should_log_images(batch_idx):
             self._log_images(images, targets, outputs)
         return loss
@@ -347,7 +390,10 @@ class MedTokenSegLightningModule(pl.LightningModule):
             ds_losses["loss"] = total_ds_loss
             return ds_losses, total_ds_loss
         else:
-            raw_loss = self.criterion(outputs, targets)
+            try:
+                raw_loss = self.criterion(outputs, targets)
+            except TypeError:
+                raw_loss = self.criterion(outputs, targets, None)
         if isinstance(raw_loss, dict):
             tensor_losses = {k: self._to_tensor(v) for k, v in raw_loss.items()}
             total_loss = torch.stack(list(tensor_losses.values())).sum()
@@ -407,6 +453,120 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 except ValueError:
                     continue
         raise ValueError("Unable to extract prediction tensor from model outputs.")
+
+    def _sliding_window_predict_batch(self, images: torch.Tensor) -> torch.Tensor:
+        preds = [self._sliding_window_predict_single(img.unsqueeze(0)) for img in images]
+        return torch.cat(preds, dim=0)
+
+    def _sliding_window_predict_single(self, image: torch.Tensor) -> torch.Tensor:
+        _, _, height, width = image.shape
+        patch_h, patch_w = self.val_sw_patch_size
+        stride_h = max(int(patch_h * (1 - self.val_sw_overlap)), 1)
+        stride_w = max(int(patch_w * (1 - self.val_sw_overlap)), 1)
+
+        pad_h = max(patch_h - height, 0)
+        pad_w = max(patch_w - width, 0)
+        if pad_h > 0 or pad_w > 0:
+            image = torch.nn.functional.pad(image, (0, pad_w, 0, pad_h))
+            height = image.shape[2]
+            width = image.shape[3]
+
+        gaussian = self._val_gaussian_map(
+            patch_h=patch_h,
+            patch_w=patch_w,
+            device=image.device,
+            dtype=image.dtype,
+        )
+
+        output: Optional[torch.Tensor] = None
+        weight_sum = torch.zeros((1, 1, height, width), device=image.device, dtype=image.dtype)
+
+        y_positions = list(range(0, height - patch_h + 1, stride_h))
+        x_positions = list(range(0, width - patch_w + 1, stride_w))
+        if y_positions[-1] != height - patch_h:
+            y_positions.append(height - patch_h)
+        if x_positions[-1] != width - patch_w:
+            x_positions.append(width - patch_w)
+
+        for y in y_positions:
+            for x in x_positions:
+                patch = image[:, :, y : y + patch_h, x : x + patch_w]
+                pred = self._apply_val_mirror(patch)
+                if output is None:
+                    output = torch.zeros(
+                        (1, pred.shape[1], height, width),
+                        device=image.device,
+                        dtype=pred.dtype,
+                    )
+                output[:, :, y : y + patch_h, x : x + patch_w] += pred * gaussian
+                weight_sum[:, :, y : y + patch_h, x : x + patch_w] += gaussian
+
+        assert output is not None
+        output = output / weight_sum.clamp_min(1e-8)
+        return output[:, :, : image.shape[2] - pad_h, : image.shape[3] - pad_w]
+
+    def _apply_val_mirror(self, patch: torch.Tensor) -> torch.Tensor:
+        if not self.val_sw_mirror:
+            pred = self.model(patch)
+            return self._extract_pred_masks(pred)
+
+        flips = [()]
+        if self.val_sw_mirror_axes:
+            for r in range(1, len(self.val_sw_mirror_axes) + 1):
+                flips.extend(itertools.combinations(self.val_sw_mirror_axes, r))
+
+        outputs = []
+        for axes in flips:
+            augmented = patch
+            if axes:
+                augmented = torch.flip(augmented, dims=[a + 2 for a in axes])
+            pred = self.model(augmented)
+            pred = self._extract_pred_masks(pred)
+            if axes:
+                pred = torch.flip(pred, dims=[a + 2 for a in axes])
+            outputs.append(pred)
+        return torch.stack(outputs, dim=0).mean(dim=0)
+
+    def _val_gaussian_map(
+        self,
+        patch_h: int,
+        patch_w: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        key = (
+            patch_h,
+            patch_w,
+            str(device),
+            str(dtype),
+            self.val_sw_gaussian_sigma_scale,
+            self.val_sw_gaussian_value_scaling,
+        )
+        cached = self._val_gaussian_cache.get(key)
+        if cached is not None:
+            return cached
+
+        yy, xx = torch.meshgrid(
+            torch.arange(patch_h, device=device, dtype=dtype),
+            torch.arange(patch_w, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        center_y = (patch_h - 1) / 2.0
+        center_x = (patch_w - 1) / 2.0
+        sigma_y = max(float(patch_h) * self.val_sw_gaussian_sigma_scale, 1e-6)
+        sigma_x = max(float(patch_w) * self.val_sw_gaussian_sigma_scale, 1e-6)
+        weight = torch.exp(
+            -(
+                ((yy - center_y) ** 2) / (2.0 * sigma_y ** 2)
+                + ((xx - center_x) ** 2) / (2.0 * sigma_x ** 2)
+            )
+        )
+        weight = weight / weight.max().clamp_min(1e-8)
+        weight = weight * self.val_sw_gaussian_value_scaling
+        min_nonzero = weight[weight > 0].min().clamp_min(1e-8)
+        weight = torch.clamp(weight, min=min_nonzero)
+        self._val_gaussian_cache[key] = weight
+        return weight
 
     def _compute_segmentation_metrics(
         self, preds: torch.Tensor, targets: torch.Tensor

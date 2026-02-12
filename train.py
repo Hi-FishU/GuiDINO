@@ -1,4 +1,5 @@
 import argparse
+import os
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -6,12 +7,15 @@ import torch
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 
+# Disable Albumentations online version check warnings in offline environments.
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
 from data.segmentation import MedTokenSegmentationDataModule
 from model.swinunet import SwinUnet
 from model.unet import UNet
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
 from model.unet import GuideUNet
-from model.nnwnet import WNet2D
+from model.nnwnet import GuideWNet2D, WNet2D
 from model.wrapper import MedTokenSegLightningModule
 from utils.loss import (
     DC_and_BCE_loss,
@@ -36,6 +40,11 @@ class ChannelsLastWrapper(torch.nn.Module):
             images = images.to(memory_format=torch.channels_last)
         return self.model(images, *args, **kwargs)
 
+
+def _uses_imagenet_norm(seg_preprocess: str) -> bool:
+    return seg_preprocess in {"dino", "dino_strong"}
+
+
 def build_criterion(args) -> torch.nn.Module:
     soft_dice_kwargs = {
         "batch_dice": args.dice_batch_dice,
@@ -43,12 +52,15 @@ def build_criterion(args) -> torch.nn.Module:
         "smooth": args.dice_smooth,
         "ddp": False,
     }
+    # BCE-style binary segmentation is single-channel in this codebase; excluding
+    # background would drop the only channel and produce NaNs in Dice.
+    soft_dice_kwargs_bce = dict(soft_dice_kwargs, do_bg=True)
 
     if args.loss == "dc_bce":
         bce_kwargs = {}
         return DC_and_BCE_loss(
             bce_kwargs=bce_kwargs,
-            soft_dice_kwargs=soft_dice_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs_bce,
             weight_ce=args.weight_ce,
             weight_dice=args.weight_dice,
             use_ignore_label=False,
@@ -77,7 +89,7 @@ def build_criterion(args) -> torch.nn.Module:
         bce_kwargs = {}
         return Guide_DC_and_BCE_loss(
             bce_kwargs=bce_kwargs,
-            soft_dice_kwargs=soft_dice_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs_bce,
             weight_ce=args.weight_ce,
             weight_dice=args.weight_dice,
             use_ignore_label=False,
@@ -87,7 +99,7 @@ def build_criterion(args) -> torch.nn.Module:
         bce_kwargs = {}
         return DC_and_BCE_and_HingeD_loss(
             bce_kwargs=bce_kwargs,
-            soft_dice_kwargs=soft_dice_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs_bce,
             weight_ce=args.weight_ce,
             weight_dice=args.weight_dice,
             use_ignore_label=False,
@@ -110,7 +122,7 @@ def build_criterion(args) -> torch.nn.Module:
         bce_kwargs = {}
         return Guide_DC_and_BCE_and_HingeD_loss(
             bce_kwargs=bce_kwargs,
-            soft_dice_kwargs=soft_dice_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs_bce,
             weight_ce=args.weight_ce,
             weight_dice=args.weight_dice,
             use_ignore_label=False,
@@ -133,7 +145,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=672)
     parser.add_argument("--patch-train-size", type=int, nargs="+", default=None)
+    parser.add_argument("--val-sw-patch-size", type=int, nargs="+", default=None)
     parser.add_argument("--oversample-foreground", type=float, default=0.33)
+    parser.add_argument("--fullres-val-eval", action="store_true", default=True)
+    parser.add_argument("--no-fullres-val-eval", action="store_false", dest="fullres_val_eval")
+    parser.add_argument("--val-sw-overlap", type=float, default=0.5)
+    parser.add_argument("--val-sw-mirror", action="store_true", default=True)
+    parser.add_argument("--no-val-sw-mirror", action="store_false", dest="val_sw_mirror")
+    parser.add_argument("--val-sw-mirror-axes", type=int, nargs="+", default=[0, 1])
+    parser.add_argument("--val-sw-gaussian-sigma-scale", type=float, default=1.0 / 8.0)
+    parser.add_argument("--val-sw-gaussian-value-scaling", type=float, default=10.0)
     parser.add_argument("--drive-val-split", type=float, default=0.2)
     parser.add_argument("--kvasir-val-split", type=float, default=0.1)
     parser.add_argument("--synapse-val-split", type=float, default=0.2)
@@ -207,7 +228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-model", type=str, default="smoke-test")
     parser.add_argument(
         "--model",
-        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnwnet"],
+        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnwnet", "guidennwnet"],
         default="swinunet",
         help="Backbone/decoder choice for segmentation.",
     )
@@ -266,6 +287,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if any(axis not in (0, 1) for axis in args.val_sw_mirror_axes):
+        raise ValueError(
+            f"Invalid --val-sw-mirror-axes {args.val_sw_mirror_axes}. For 2D use only 0 (H) and/or 1 (W)."
+        )
+    if not (0.0 <= args.val_sw_overlap < 1.0):
+        raise ValueError("--val-sw-overlap must be in [0.0, 1.0).")
     if args.use_guide:
         args.model = "guidedino"
         if args.loss in ("dc_bce", "dc_bce_hinged"):
@@ -273,7 +300,7 @@ def main() -> None:
     if args.synapse_root is not None:
         if args.num_classes == 1:
             args.num_classes = 9
-        dino_models = {"dinov3", "segdino", "guidedino", "guideunet"}
+        dino_models = {"dinov3", "segdino", "guidedino", "guideunet", "guidennwnet"}
         if args.model in dino_models:
             if args.in_chans == 1:
                 args.in_chans = 3
@@ -282,6 +309,12 @@ def main() -> None:
         else:
             if args.in_chans == 3:
                 args.in_chans = 1
+        if _uses_imagenet_norm(args.seg_preprocess) and args.synapse_zscore:
+            args.synapse_zscore = False
+            print(
+                "Info: Disabled --synapse-zscore because --seg-preprocess "
+                f"is '{args.seg_preprocess}' (DINO/ImageNet normalization is preserved)."
+            )
         if args.loss in ("dc_bce", "dc_bce_hinged", "guide_dc_bce", "guide_dc_bce_hinged"):
             raise ValueError("Synapse is multi-class; use --loss dc_ce or dc_topk with num_classes > 1.")
     pl.seed_everything(args.seed, workers=True)
@@ -331,6 +364,20 @@ def main() -> None:
             num_classes=args.num_classes,
             deep_supervised=args.nnwnet_deep_supervision,
         )
+    elif args.model == "guidennwnet":
+        model = GuideWNet2D(
+            in_channel=args.in_chans,
+            num_classes=args.num_classes,
+            deep_supervised=args.nnwnet_deep_supervision,
+            guide_backbone_name=args.dinov3_backbone,
+            guide_backbone_train=args.dinov3_train_backbone,
+            tokenbook_tokens=args.tokenbook_tokens,
+            tokenbook_image_size=args.image_size,
+            tokenbook_dropout=args.tokenbook_dropout,
+            tokenbook_sample_rate=args.tokenbook_sample_rate,
+            tokenbook_ema_decay=args.tokenbook_ema_decay,
+            tokenbook_use_ema=args.tokenbook_use_ema,
+        )
     elif args.model == "unet":
         model = UNet(
             in_channels=args.in_chans,
@@ -368,11 +415,11 @@ def main() -> None:
             dynamic=args.compile_dynamic,
         )
     guide_losses = {"guide_dc_ce", "guide_dc_bce", "guide_dc_bce_hinged"}
-    if (args.model in ("guidedino", "guideunet")) != (args.loss in guide_losses):
+    if (args.model in ("guidedino", "guideunet", "guidennwnet")) != (args.loss in guide_losses):
         raise ValueError(
-            "guidedino/guideunet model requires a guide loss "
+            "guidedino/guideunet/guidennwnet model requires a guide loss "
             "(guide_dc_bce or guide_dc_bce_hinged), and guide losses "
-            "require --model guidedino or guideunet."
+            "require --model guidedino, guideunet, or guidennwnet."
         )
     criterion = build_criterion(args)
 
@@ -399,6 +446,15 @@ def main() -> None:
         train_epoch_eval=args.train_epoch_eval,
         log_image_samples=args.log_image_samples,
         log_image_every_n_epochs=args.log_image_every_n_epochs,
+        val_use_sliding_window=args.fullres_val_eval,
+        val_sw_patch_size=tuple(args.val_sw_patch_size) if args.val_sw_patch_size else (
+            tuple(args.patch_train_size) if args.patch_train_size else (args.image_size, args.image_size)
+        ),
+        val_sw_overlap=args.val_sw_overlap,
+        val_sw_mirror=args.val_sw_mirror,
+        val_sw_mirror_axes=tuple(sorted(set(args.val_sw_mirror_axes))),
+        val_sw_gaussian_sigma_scale=args.val_sw_gaussian_sigma_scale,
+        val_sw_gaussian_value_scaling=args.val_sw_gaussian_value_scaling,
     )
 
     data_module = MedTokenSegmentationDataModule(
@@ -422,6 +478,7 @@ def main() -> None:
         preprocessing=args.seg_preprocess,
         patch_size=tuple(args.patch_train_size) if args.patch_train_size else None,
         oversample_foreground_prob=args.oversample_foreground,
+        full_res_val_eval=args.fullres_val_eval,
     )
 
     callbacks = [
