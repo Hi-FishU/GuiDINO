@@ -129,6 +129,8 @@ class GuideUNet(nn.Module):
         tokenbook_image_size: int | None = None,
         tokenbook_dropout: float = 0.0,
         tokenbook_sample_rate: float = 1.0,
+        tokenbook_ema_decay: float | None = None,
+        tokenbook_use_ema: bool = False,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -182,6 +184,8 @@ class GuideUNet(nn.Module):
             n_tokens=tokenbook_tokens,
             embed_dim=guide_embed_dim,
             dropout=tokenbook_dropout,
+            ema_decay=tokenbook_ema_decay,
+            use_ema=tokenbook_use_ema,
         )
 
         self.up1 = Up(base_channels * 16, base_channels *

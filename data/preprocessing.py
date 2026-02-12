@@ -104,3 +104,29 @@ def get_segmentation_val_transform_dino(image_size=256):
         ),
         ToTensorV2(),
     ])
+
+
+def get_segmentation_train_transform_dino_strong(image_size=256):
+    """
+    Strong augmentation aligned with DINO data prior:
+    nnUNet-style geometric/intensity transforms + ImageNet normalization.
+    """
+    height, width = _resolve_hw(image_size)
+    return A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.2),
+        A.ElasticTransform(alpha=120, sigma=6, p=0.1),
+        A.Affine(scale=(0.8, 1.2), rotate=(-30, 30), translate_percent=0.0, p=0.2),
+        A.RandomGamma(p=0.2),
+        A.RandomBrightnessContrast(p=0.2),
+        A.GaussNoise(p=0.15),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.05),
+        A.Resize(height, width),
+        A.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            max_pixel_value=255.0,
+        ),
+        ToTensorV2(),
+    ])

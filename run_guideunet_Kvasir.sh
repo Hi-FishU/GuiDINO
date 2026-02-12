@@ -6,7 +6,7 @@ python train.py \
   --kvasir-root data_source/Kvasir \
   --loss guide_dc_bce \
   --image-size 512 \
-  --seg-preprocess dino \
+  --seg-preprocess dino_strong \
   --weight-guide 0.1 \
   --tokenbook-dropout 0.5 \
   --tokenbook-sample-rate 0.5 \

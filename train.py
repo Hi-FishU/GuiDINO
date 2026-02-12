@@ -11,8 +11,17 @@ from model.swinunet import SwinUnet
 from model.unet import UNet
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
 from model.unet import GuideUNet
+from model.nnwnet import WNet2D
 from model.wrapper import MedTokenSegLightningModule
-from utils.loss import DC_and_BCE_loss, DC_and_CE_loss, DC_and_topk_loss, Guide_DC_and_BCE_loss
+from utils.loss import (
+    DC_and_BCE_loss,
+    DC_and_BCE_and_HingeD_loss,
+    DC_and_CE_loss,
+    DC_and_topk_loss,
+    Guide_DC_and_BCE_and_HingeD_loss,
+    Guide_DC_and_BCE_loss,
+    Guide_DC_and_CE_loss,
+)
 
 torch.set_float32_matmul_precision('high')
 
@@ -29,9 +38,9 @@ class ChannelsLastWrapper(torch.nn.Module):
 
 def build_criterion(args) -> torch.nn.Module:
     soft_dice_kwargs = {
-        "batch_dice": False,
-        "do_bg": True,
-        "smooth": 1.0,
+        "batch_dice": args.dice_batch_dice,
+        "do_bg": args.dice_do_bg,
+        "smooth": args.dice_smooth,
         "ddp": False,
     }
 
@@ -74,6 +83,43 @@ def build_criterion(args) -> torch.nn.Module:
             use_ignore_label=False,
             weight_guide=args.weight_guide,
         )
+    if args.loss == "dc_bce_hinged":
+        bce_kwargs = {}
+        return DC_and_BCE_and_HingeD_loss(
+            bce_kwargs=bce_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs,
+            weight_ce=args.weight_ce,
+            weight_dice=args.weight_dice,
+            use_ignore_label=False,
+            weight_hinge_d=args.weight_hinge_d,
+            hinge_d_margin=args.hinge_d_margin,
+            hinge_d_kernel_size=args.hinge_d_kernel_size,
+            hinge_d_boundary_only=args.hinge_d_boundary_only,
+        )
+    if args.loss == "guide_dc_ce":
+        ce_kwargs = {}
+        return Guide_DC_and_CE_loss(
+            soft_dice_kwargs=soft_dice_kwargs,
+            ce_kwargs=ce_kwargs,
+            weight_ce=args.weight_ce,
+            weight_dice=args.weight_dice,
+            ignore_label=None,
+            weight_guide=args.weight_guide,
+        )
+    if args.loss == "guide_dc_bce_hinged":
+        bce_kwargs = {}
+        return Guide_DC_and_BCE_and_HingeD_loss(
+            bce_kwargs=bce_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs,
+            weight_ce=args.weight_ce,
+            weight_dice=args.weight_dice,
+            use_ignore_label=False,
+            weight_guide=args.weight_guide,
+            weight_hinge_d=args.weight_hinge_d,
+            hinge_d_margin=args.hinge_d_margin,
+            hinge_d_kernel_size=args.hinge_d_kernel_size,
+            hinge_d_boundary_only=args.hinge_d_boundary_only,
+        )
 
     raise ValueError(f"Unknown loss type: {args.loss}")
 
@@ -82,11 +128,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MedToken segmentation training")
     parser.add_argument("--drive-root", type=Path, default=None)
     parser.add_argument("--kvasir-root", type=Path, default=None)
+    parser.add_argument("--synapse-root", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=672)
+    parser.add_argument("--patch-train-size", type=int, nargs="+", default=None)
+    parser.add_argument("--oversample-foreground", type=float, default=0.33)
     parser.add_argument("--drive-val-split", type=float, default=0.2)
     parser.add_argument("--kvasir-val-split", type=float, default=0.1)
+    parser.add_argument("--synapse-val-split", type=float, default=0.2)
+    parser.add_argument("--synapse-include-empty", action="store_true", default=False)
+    parser.add_argument("--synapse-to-rgb", action="store_true", default=False)
+    parser.add_argument("--synapse-cache", action="store_true", default=False)
+    parser.add_argument("--synapse-target-spacing", type=float, nargs=3, default=None)
+    parser.add_argument("--synapse-crop-nonzero", action="store_true", default=True)
+    parser.add_argument("--no-synapse-crop-nonzero", action="store_false", dest="synapse_crop_nonzero")
+    parser.add_argument("--synapse-zscore", action="store_true", default=True)
+    parser.add_argument("--no-synapse-zscore", action="store_false", dest="synapse_zscore")
     parser.add_argument("--max-epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--weight-decay", type=float, default=3e-5)
@@ -98,12 +156,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poly-power", type=float, default=0.9)
     parser.add_argument(
         "--lr-scheduler",
-        choices=["poly", "cosine", "c", "cosine_restart", "none"],
+        choices=["poly", "cosine", "cosine_restart", "none"],
         default="poly",
     )
     parser.add_argument("--cosine-t-max", type=int, default=None)
-    parser.add_argument("--cosine-restart-t-0", type=int, default=None)
-    parser.add_argument("--cosine-restart-t-mult", type=int, default=1)
+    parser.add_argument("--cosine-restart-t-0", type=int, default=10)
+    parser.add_argument("--cosine-restart-t-mult", type=int, default=2)
     parser.add_argument("--cosine-restart-eta-min", type=float, default=0.0)
     parser.add_argument("--best-metric", type=str, default="val/dice")
     parser.add_argument("--best-metric-mode", choices=["max", "min"], default="max")
@@ -111,26 +169,50 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-ce", type=float, default=1.0)
     parser.add_argument("--weight-dice", type=float, default=1.0)
     parser.add_argument("--weight-guide", type=float, default=0.1)
+    parser.add_argument("--weight-hinge-d", type=float, default=0.1)
+    parser.add_argument("--dice-do-bg", action="store_true", default=False)
+    parser.add_argument("--no-dice-do-bg", action="store_false", dest="dice_do_bg")
+    parser.add_argument("--dice-batch-dice", action="store_true", default=True)
+    parser.add_argument("--no-dice-batch-dice", action="store_false", dest="dice_batch_dice")
+    parser.add_argument("--dice-smooth", type=float, default=1e-5)
+    parser.add_argument("--hinge-d-margin", type=float, default=1.0)
+    parser.add_argument("--hinge-d-kernel-size", type=int, default=3)
+    parser.add_argument("--hinge-d-boundary-only", action="store_true", default=True)
+    parser.add_argument("--no-hinge-d-boundary-only", action="store_false", dest="hinge_d_boundary_only")
     parser.add_argument("--topk-percent", type=float, default=10.0)
     parser.add_argument(
         "--loss",
-        choices=["dc_bce", "dc_ce", "dc_topk", "guide_dc_bce"],
+        choices=[
+            "dc_bce",
+            "dc_ce",
+            "dc_topk",
+            "dc_bce_hinged",
+            "guide_dc_ce",
+            "guide_dc_bce",
+            "guide_dc_bce_hinged",
+        ],
         default="dc_bce",
     )
-    parser.add_argument("--seg-preprocess", choices=["nnunet", "dino"], default="nnunet")
+    parser.add_argument(
+        "--seg-preprocess",
+        choices=["nnunet", "dino", "dino_strong"],
+        default="nnunet",
+    )
     parser.add_argument("--patch-size", type=int, default=4)
     parser.add_argument("--in-chans", type=int, default=3)
     parser.add_argument("--num-classes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-dir", type=Path, default=Path("outputs/logs"))
     parser.add_argument("--run-name", type=str, default="medtoken-seg")
-    parser.add_argument("--run-model", type=str, default="dino-drive")
+    parser.add_argument("--run-model", type=str, default="smoke-test")
     parser.add_argument(
         "--model",
-        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino"],
+        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnwnet"],
         default="swinunet",
         help="Backbone/decoder choice for segmentation.",
     )
+    parser.add_argument("--nnwnet-deep-supervision", action="store_true", default=True)
+    parser.add_argument("--no-nnwnet-deep-supervision", action="store_false", dest="nnwnet_deep_supervision")
     parser.add_argument(
         "--use-guide",
         action="store_true",
@@ -164,6 +246,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenbook-tokens", type=int, default=None)
     parser.add_argument("--tokenbook-dropout", type=float, default=0.0)
     parser.add_argument("--tokenbook-sample-rate", type=float, default=1.0)
+    parser.add_argument("--tokenbook-ema-decay", type=float, default=None)
+    parser.add_argument("--tokenbook-use-ema", action="store_true", default=False)
     parser.add_argument(
         "--segdino-encoder-size",
         choices=["small", "base", "large", "giant"],
@@ -184,7 +268,22 @@ def main() -> None:
     args = parse_args()
     if args.use_guide:
         args.model = "guidedino"
-        args.loss = "guide_dc_bce"
+        if args.loss in ("dc_bce", "dc_bce_hinged"):
+            args.loss = "guide_dc_bce"
+    if args.synapse_root is not None:
+        if args.num_classes == 1:
+            args.num_classes = 9
+        dino_models = {"dinov3", "segdino", "guidedino", "guideunet"}
+        if args.model in dino_models:
+            if args.in_chans == 1:
+                args.in_chans = 3
+            if not args.synapse_to_rgb:
+                args.synapse_to_rgb = True
+        else:
+            if args.in_chans == 3:
+                args.in_chans = 1
+        if args.loss in ("dc_bce", "dc_bce_hinged", "guide_dc_bce", "guide_dc_bce_hinged"):
+            raise ValueError("Synapse is multi-class; use --loss dc_ce or dc_topk with num_classes > 1.")
     pl.seed_everything(args.seed, workers=True)
     project = args.run_name
     name = args.run_model
@@ -214,6 +313,8 @@ def main() -> None:
             tokenbook_image_size=args.image_size,
             tokenbook_dropout=args.tokenbook_dropout,
             tokenbook_sample_rate=args.tokenbook_sample_rate,
+            tokenbook_ema_decay=args.tokenbook_ema_decay,
+            tokenbook_use_ema=args.tokenbook_use_ema,
         )
     elif args.model == "segdino":
         model = SegDINOModel(
@@ -223,6 +324,12 @@ def main() -> None:
             encoder_size=args.segdino_encoder_size,
             features=args.segdino_features,
             out_channels=args.segdino_out_channels,
+        )
+    elif args.model == "nnwnet":
+        model = WNet2D(
+            in_channel=args.in_chans,
+            num_classes=args.num_classes,
+            deep_supervised=args.nnwnet_deep_supervision,
         )
     elif args.model == "unet":
         model = UNet(
@@ -239,6 +346,8 @@ def main() -> None:
             tokenbook_image_size=args.image_size,
             tokenbook_dropout=args.tokenbook_dropout,
             tokenbook_sample_rate=args.tokenbook_sample_rate,
+            tokenbook_ema_decay=args.tokenbook_ema_decay,
+            tokenbook_use_ema=args.tokenbook_use_ema,
         )
     else:
         model = SwinUnet(
@@ -258,10 +367,12 @@ def main() -> None:
             mode=args.compile_mode,
             dynamic=args.compile_dynamic,
         )
-    if (args.model in ("guidedino", "guideunet")) != (args.loss == "guide_dc_bce"):
+    guide_losses = {"guide_dc_ce", "guide_dc_bce", "guide_dc_bce_hinged"}
+    if (args.model in ("guidedino", "guideunet")) != (args.loss in guide_losses):
         raise ValueError(
-            "guidedino/guideunet model requires --loss guide_dc_bce, and "
-            "guide_dc_bce loss requires --model guidedino or guideunet."
+            "guidedino/guideunet model requires a guide loss "
+            "(guide_dc_bce or guide_dc_bce_hinged), and guide losses "
+            "require --model guidedino or guideunet."
         )
     criterion = build_criterion(args)
 
@@ -293,13 +404,24 @@ def main() -> None:
     data_module = MedTokenSegmentationDataModule(
         drive_root=args.drive_root,
         kvasir_root=args.kvasir_root,
+        synapse_root=args.synapse_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         image_size=args.image_size,
         drive_val_split=args.drive_val_split,
         kvasir_val_split=args.kvasir_val_split,
+        synapse_val_split=args.synapse_val_split,
+        synapse_include_empty=args.synapse_include_empty,
+        synapse_to_rgb=args.synapse_to_rgb,
+        synapse_cache=args.synapse_cache,
+        synapse_target_spacing=tuple(args.synapse_target_spacing) if args.synapse_target_spacing else None,
+        synapse_crop_nonzero=args.synapse_crop_nonzero,
+        synapse_zscore=args.synapse_zscore,
+        seed=args.seed,
         prefetch_factor=args.prefetch_factor,
         preprocessing=args.seg_preprocess,
+        patch_size=tuple(args.patch_train_size) if args.patch_train_size else None,
+        oversample_foreground_prob=args.oversample_foreground,
     )
 
     callbacks = [

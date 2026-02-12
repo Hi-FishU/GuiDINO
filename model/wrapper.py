@@ -337,6 +337,15 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 raw_loss = self.criterion(logits, targets, guide_mask)
             except TypeError:
                 raw_loss = self.criterion(logits, targets)
+        elif (
+            isinstance(outputs, (list, tuple))
+            and len(outputs) > 0
+            and all(torch.is_tensor(o) for o in outputs)
+        ):
+            ds_losses = self._compute_deep_supervision_loss(outputs, targets)
+            total_ds_loss = torch.stack(list(ds_losses.values())).sum()
+            ds_losses["loss"] = total_ds_loss
+            return ds_losses, total_ds_loss
         else:
             raw_loss = self.criterion(outputs, targets)
         if isinstance(raw_loss, dict):
@@ -345,6 +354,38 @@ class MedTokenSegLightningModule(pl.LightningModule):
             return tensor_losses, total_loss
         tensor_loss = self._to_tensor(raw_loss)
         return {"loss": tensor_loss}, tensor_loss
+
+    def _compute_deep_supervision_loss(
+        self, outputs: list[torch.Tensor] | tuple[torch.Tensor, ...], targets: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        num_outputs = len(outputs)
+        weights = [1.0 / (2 ** i) for i in range(num_outputs)]
+        weight_sum = sum(weights)
+        weights = [w / weight_sum for w in weights]
+
+        loss_dict: Dict[str, torch.Tensor] = {}
+        for idx, (logits, weight) in enumerate(zip(outputs, weights)):
+            target_level = self._resize_target_to_logits(targets, logits)
+            component = self._to_tensor(self.criterion(logits, target_level)) * weight
+            loss_dict[f"ds_loss_{idx}"] = component
+        return loss_dict
+
+    def _resize_target_to_logits(self, targets: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        if targets.shape[2:] == logits.shape[2:]:
+            return targets
+        if targets.dtype.is_floating_point:
+            resized = torch.nn.functional.interpolate(
+                targets.float(),
+                size=logits.shape[2:],
+                mode="nearest",
+            )
+            return resized.to(dtype=targets.dtype)
+        resized = torch.nn.functional.interpolate(
+            targets.float(),
+            size=logits.shape[2:],
+            mode="nearest",
+        )
+        return resized.long()
 
     def _to_tensor(self, value: Any) -> torch.Tensor:
         if torch.is_tensor(value):
@@ -372,11 +413,54 @@ class MedTokenSegLightningModule(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         eps = 1e-6
         preds = preds.detach()
-        targets = targets.detach().float()
+        targets = targets.detach()
         if preds.dim() == 3:
             preds = preds.unsqueeze(1)
         if targets.dim() == 3:
             targets = targets.unsqueeze(1)
+        if preds.size(1) > 1 or targets.max().item() > 1:
+            if preds.size(1) > 1:
+                pred_labels = torch.argmax(preds, dim=1)
+                num_classes = preds.size(1)
+            else:
+                pred_labels = (torch.sigmoid(preds) > self.threshold).long().squeeze(1)
+                num_classes = int(targets.max().item()) + 1
+
+            if targets.size(1) > 1:
+                target_labels = torch.argmax(targets, dim=1)
+                num_classes = max(num_classes, targets.size(1))
+            else:
+                target_labels = targets[:, 0].long()
+                num_classes = max(num_classes, int(targets.max().item()) + 1)
+
+            metrics: Dict[str, torch.Tensor] = {}
+            dice_values: List[torch.Tensor] = []
+            jaccard_values: List[torch.Tensor] = []
+
+            for class_idx in range(num_classes):
+                pred_c = pred_labels == class_idx
+                target_c = target_labels == class_idx
+                intersection = (pred_c & target_c).sum(dim=(1, 2)).float()
+                pred_area = pred_c.sum(dim=(1, 2)).float()
+                target_area = target_c.sum(dim=(1, 2)).float()
+                union = pred_area + target_area - intersection
+
+                dice = (2 * intersection + eps) / (pred_area + target_area + eps)
+                jaccard = (intersection + eps) / (union + eps)
+                metrics[f"dice_class_{class_idx}"] = dice.mean()
+                metrics[f"jaccard_class_{class_idx}"] = jaccard.mean()
+                if class_idx != 0:
+                    dice_values.append(dice)
+                    jaccard_values.append(jaccard)
+
+            if dice_values:
+                metrics["dice"] = torch.stack([d.mean() for d in dice_values]).mean()
+                metrics["jaccard"] = torch.stack([j.mean() for j in jaccard_values]).mean()
+            else:
+                metrics["dice"] = metrics.get("dice_class_0", torch.tensor(0.0, device=preds.device))
+                metrics["jaccard"] = metrics.get("jaccard_class_0", torch.tensor(0.0, device=preds.device))
+            return metrics
+
         preds_bin = self._binarize_predictions(preds)
         targets_bin = (targets > 0.5).float()
 

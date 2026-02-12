@@ -12,4 +12,4 @@ python train.py \
   --loss dc_bce \
   --weight-dice 0.0 \
   --segdino-encoder-size small \
-  --seg-preprocess dino
+  --seg-preprocess dino_strong

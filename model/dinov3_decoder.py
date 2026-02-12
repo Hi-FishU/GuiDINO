@@ -219,6 +219,8 @@ class GuideSegmentationDecoder(nn.Module):
         tokenbook_tokens: int = 1,
         tokenbook_dropout: float = 0.0,
         tokenbook_sample_rate: float = 1.0,
+        tokenbook_ema_decay: float | None = None,
+        tokenbook_use_ema: bool = False,
     ):
         super().__init__()
         num_groups = 32 if hidden_dim % 32 == 0 else 1
@@ -226,6 +228,8 @@ class GuideSegmentationDecoder(nn.Module):
             n_tokens=tokenbook_tokens,
             embed_dim=in_channels,
             dropout=tokenbook_dropout,
+            ema_decay=tokenbook_ema_decay,
+            use_ema=tokenbook_use_ema,
         )
         self.tokenbook_sample_rate = float(tokenbook_sample_rate)
         self.proj = nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1)
@@ -272,6 +276,8 @@ class GuideDINOModel(nn.Module):
         tokenbook_image_size: int | None = None,
         tokenbook_dropout: float = 0.0,
         tokenbook_sample_rate: float = 1.0,
+        tokenbook_ema_decay: float | None = None,
+        tokenbook_use_ema: bool = False,
     ):
         super().__init__()
         self.backbone = DINOv3BackboneWrapper(
@@ -296,6 +302,8 @@ class GuideDINOModel(nn.Module):
             tokenbook_tokens=tokenbook_tokens,
             tokenbook_dropout=tokenbook_dropout,
             tokenbook_sample_rate=tokenbook_sample_rate,
+            tokenbook_ema_decay=tokenbook_ema_decay,
+            tokenbook_use_ema=tokenbook_use_ema,
         )
 
     def forward(self, images: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -1,5 +1,6 @@
 import torch
 from torch import nn, Tensor
+import torch.nn.functional as F
 
 
 def softmax_helper_dim1(x: torch.Tensor) -> torch.Tensor:
@@ -312,4 +313,136 @@ class Guide_DC_and_BCE_loss(DC_and_BCE_loss):
             guide_loss = nn.functional.mse_loss(guide_mask, target_resize, reduction='mean')
             loss += self.weight_guide * guide_loss
         return loss
+
+class Guide_DC_and_CE_loss(DC_and_CE_loss):
+    def __init__(self, soft_dice_kwargs, ce_kwargs, weight_ce=1, weight_dice=1, ignore_label=None,
+                 dice_class=SoftDiceLoss, weight_guide=1):
+        super().__init__(soft_dice_kwargs, ce_kwargs, weight_ce, weight_dice, ignore_label, dice_class)
+        self.weight_guide = weight_guide
+
+    def forward(self, net_output: Tensor, target: Tensor, guide_mask: Tensor) -> Tensor:
+        loss = super().forward(net_output, target)
+        if guide_mask is not None:
+            guide_mask = guide_mask.float()
+            target = (target != 0).float()
+            target_resize = nn.functional.interpolate(target, size=guide_mask.shape[2:], mode='nearest')
+            guide_loss = nn.functional.mse_loss(guide_mask, target_resize, reduction='mean')
+            loss += self.weight_guide * guide_loss
+        return loss
+
+class HingeDetailLoss(nn.Module):
+    """Boundary-focused hinge loss for sharper segmentation detail."""
+
+    def __init__(self, margin: float = 1.0, kernel_size: int = 3, boundary_only: bool = True):
+        super().__init__()
+        self.margin = float(margin)
+        self.kernel_size = int(kernel_size)
+        self.boundary_only = bool(boundary_only)
+
+    def _boundary_mask(self, target: Tensor) -> Tensor:
+        pad = self.kernel_size // 2
+        dilated = F.max_pool2d(target, kernel_size=self.kernel_size, stride=1, padding=pad)
+        eroded = -F.max_pool2d(-target, kernel_size=self.kernel_size, stride=1, padding=pad)
+        return (dilated - eroded > 0).float()
+
+    def forward(self, net_output: Tensor, target: Tensor, loss_mask: Tensor | None = None) -> Tensor:
+        target = target.float()
+        signed_target = target * 2.0 - 1.0
+        hinge = F.relu(self.margin - signed_target * net_output)
+
+        if self.boundary_only:
+            detail_mask = self._boundary_mask(target)
+            if loss_mask is not None:
+                detail_mask = detail_mask * loss_mask.float()
+            denom = detail_mask.sum().clamp_min(1.0)
+            return (hinge * detail_mask).sum() / denom
+
+        if loss_mask is not None:
+            hinge = hinge * loss_mask.float()
+            denom = loss_mask.sum().clamp_min(1.0)
+            return hinge.sum() / denom
+
+        return hinge.mean()
+
+
+class DC_and_BCE_and_HingeD_loss(DC_and_BCE_loss):
+    def __init__(
+        self,
+        bce_kwargs,
+        soft_dice_kwargs,
+        weight_ce=1,
+        weight_dice=1,
+        use_ignore_label: bool = False,
+        dice_class=MemoryEfficientSoftDiceLoss,
+        weight_hinge_d: float = 0.1,
+        hinge_d_margin: float = 1.0,
+        hinge_d_kernel_size: int = 3,
+        hinge_d_boundary_only: bool = True,
+    ):
+        super().__init__(bce_kwargs, soft_dice_kwargs, weight_ce, weight_dice, use_ignore_label, dice_class)
+        self.weight_hinge_d = weight_hinge_d
+        self.hinge_d = HingeDetailLoss(
+            margin=hinge_d_margin,
+            kernel_size=hinge_d_kernel_size,
+            boundary_only=hinge_d_boundary_only,
+        )
+
+    def forward(self, net_output: Tensor, target: Tensor) -> Tensor:
+        loss = super().forward(net_output, target)
+        if self.use_ignore_label:
+            if target.dtype == torch.bool:
+                mask = ~target[:, -1:]
+            else:
+                mask = (1 - target[:, -1:]).bool()
+            target_regions = target[:, :-1]
+        else:
+            target_regions = target
+            mask = None
+        loss += self.weight_hinge_d * self.hinge_d(net_output, target_regions, loss_mask=mask)
+        return loss
+
+
+class Guide_DC_and_BCE_and_HingeD_loss(Guide_DC_and_BCE_loss):
+    def __init__(
+        self,
+        bce_kwargs,
+        soft_dice_kwargs,
+        weight_ce=1,
+        weight_dice=1,
+        use_ignore_label: bool = False,
+        dice_class=MemoryEfficientSoftDiceLoss,
+        weight_guide=1,
+        weight_hinge_d: float = 0.1,
+        hinge_d_margin: float = 1.0,
+        hinge_d_kernel_size: int = 3,
+        hinge_d_boundary_only: bool = True,
+    ):
+        super().__init__(
+            bce_kwargs=bce_kwargs,
+            soft_dice_kwargs=soft_dice_kwargs,
+            weight_ce=weight_ce,
+            weight_dice=weight_dice,
+            use_ignore_label=use_ignore_label,
+            dice_class=dice_class,
+            weight_guide=weight_guide,
+        )
+        self.weight_hinge_d = weight_hinge_d
+        self.hinge_d = HingeDetailLoss(
+            margin=hinge_d_margin,
+            kernel_size=hinge_d_kernel_size,
+            boundary_only=hinge_d_boundary_only,
+        )
+
+    def forward(self, net_output: Tensor, target: Tensor, guide_mask: Tensor) -> Tensor:
+        loss = super().forward(net_output, target, guide_mask)
+        if self.use_ignore_label:
+            if target.dtype == torch.bool:
+                mask = ~target[:, -1:]
+            else:
+                mask = (1 - target[:, -1:]).bool()
+            target_regions = target[:, :-1]
+        else:
+            target_regions = target
+            mask = None
+        loss += self.weight_hinge_d * self.hinge_d(net_output, target_regions, loss_mask=mask)
         return loss
