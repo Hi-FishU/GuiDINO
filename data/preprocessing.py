@@ -39,7 +39,7 @@ def _shared_strong_augmentations(height: int, width: int):
             shear=(-10, 10),
             p=0.2,
         ),
-        A.RandomGamma(gamma_limit=(70, 150), p=0.3),
+        # RandomGamma may emit NaNs for signed medical intensities (e.g. Synapse CT).
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.2),
         A.GaussNoise(p=0.15),
         A.OneOf([

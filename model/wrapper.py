@@ -28,6 +28,9 @@ class MedTokenSegLightningModule(pl.LightningModule):
         model: nn.Module,
         criterion: Any,
         lr: float = 1e-4,
+        lr_lora: Optional[float] = None,
+        lr_head: Optional[float] = None,
+        lr_backbone: Optional[float] = None,
         weight_decay: float = 1e-4,
         momentum: float = 0.99,
         nesterov: bool = True,
@@ -62,6 +65,9 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.model = model
         self.criterion = criterion
         self.lr = lr
+        self.lr_lora = lr_lora
+        self.lr_head = lr_head
+        self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
         self.momentum = momentum
         self.nesterov = nesterov
@@ -322,13 +328,56 @@ class MedTokenSegLightningModule(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        param_dicts = [
-            {"params": [p for p in self.model.parameters() if p.requires_grad]},
-        ]
+        named_trainable = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
+        if not named_trainable:
+            raise RuntimeError("No trainable parameters found. Check model freezing or LoRA settings.")
+
+        use_split_lrs = any(v is not None for v in (self.lr_lora, self.lr_head, self.lr_backbone))
+        if not use_split_lrs:
+            param_dicts = [{"params": [p for _, p in named_trainable], "lr": self.lr}]
+        else:
+            lora_params: list[torch.nn.Parameter] = []
+            backbone_params: list[torch.nn.Parameter] = []
+            head_params: list[torch.nn.Parameter] = []
+
+            for name, param in named_trainable:
+                if "lora_" in name:
+                    lora_params.append(param)
+                    continue
+                is_backbone = (
+                    "guide_backbone" in name
+                    or name.startswith("backbone.")
+                    or ".backbone." in f".{name}."
+                )
+                if is_backbone:
+                    backbone_params.append(param)
+                else:
+                    head_params.append(param)
+
+            param_dicts = []
+            if lora_params:
+                param_dicts.append(
+                    {"params": lora_params, "lr": self.lr_lora if self.lr_lora is not None else self.lr}
+                )
+            if backbone_params:
+                param_dicts.append(
+                    {"params": backbone_params, "lr": self.lr_backbone if self.lr_backbone is not None else self.lr}
+                )
+            if head_params:
+                param_dicts.append(
+                    {"params": head_params, "lr": self.lr_head if self.lr_head is not None else self.lr}
+                )
+
+            print(
+                "Optimizer LR groups: "
+                f"lora={len(lora_params)} params @ {self.lr_lora if self.lr_lora is not None else self.lr}, "
+                f"backbone={len(backbone_params)} params @ {self.lr_backbone if self.lr_backbone is not None else self.lr}, "
+                f"head={len(head_params)} params @ {self.lr_head if self.lr_head is not None else self.lr}"
+            )
+
         if self.optimizer_name == "adamw":
             optimizer = torch.optim.AdamW(
                 param_dicts,
-                lr=self.lr,
                 weight_decay=self.weight_decay,
                 betas=self.adamw_betas,
                 eps=self.adamw_eps,
@@ -336,7 +385,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
         else:
             optimizer = SGD(
                 param_dicts,
-                lr=self.lr,
                 weight_decay=self.weight_decay,
                 momentum=self.momentum,
                 nesterov=self.nesterov,
@@ -643,15 +691,26 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
                 dice = (2 * intersection + eps) / (pred_area + target_area + eps)
                 jaccard = (intersection + eps) / (union + eps)
-                metrics[f"dice_class_{class_idx}"] = dice.mean()
-                metrics[f"jaccard_class_{class_idx}"] = jaccard.mean()
+                valid = (pred_area + target_area) > 0
+                if valid.any():
+                    dice_mean = dice[valid].mean()
+                    jaccard_mean = jaccard[valid].mean()
+                else:
+                    # Class absent in both prediction and target across the batch.
+                    # Do not treat this as perfect score.
+                    dice_mean = torch.tensor(0.0, device=preds.device)
+                    jaccard_mean = torch.tensor(0.0, device=preds.device)
+
+                metrics[f"dice_class_{class_idx}"] = dice_mean
+                metrics[f"jaccard_class_{class_idx}"] = jaccard_mean
                 if class_idx != 0:
-                    dice_values.append(dice)
-                    jaccard_values.append(jaccard)
+                    if valid.any():
+                        dice_values.append(dice_mean)
+                        jaccard_values.append(jaccard_mean)
 
             if dice_values:
-                metrics["dice"] = torch.stack([d.mean() for d in dice_values]).mean()
-                metrics["jaccard"] = torch.stack([j.mean() for j in jaccard_values]).mean()
+                metrics["dice"] = torch.stack(dice_values).mean()
+                metrics["jaccard"] = torch.stack(jaccard_values).mean()
             else:
                 metrics["dice"] = metrics.get("dice_class_0", torch.tensor(0.0, device=preds.device))
                 metrics["jaccard"] = metrics.get("jaccard_class_0", torch.tensor(0.0, device=preds.device))

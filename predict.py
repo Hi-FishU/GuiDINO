@@ -14,6 +14,7 @@ from PIL import Image
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 from data.segmentation import discover_drive_samples, discover_kvasir_samples, discover_synapse_volumes
+from model.dinov3_backbone import DEFAULT_LORA_TARGET_MODULES
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
 from model.nnwnet import GuideWNet2D, WNet2D
 from model.swinunet import SwinUnet
@@ -27,6 +28,23 @@ _GAUSSIAN_CACHE: dict[tuple, torch.Tensor] = {}
 
 def _uses_imagenet_norm(seg_preprocess: str) -> bool:
     return seg_preprocess in {"dino", "dino_strong"}
+
+
+def _ensure_peft_available() -> None:
+    try:
+        import peft  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "LoRA options were provided but PEFT is not installed. Install with `pip install peft`."
+        ) from exc
+
+
+def _guide_backbone_for_model(model: torch.nn.Module):
+    if hasattr(model, "guide_backbone"):
+        return model.guide_backbone
+    if hasattr(model, "backbone"):
+        return model.backbone
+    return None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -62,6 +80,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov3-hidden-dim", type=int, default=256)
     parser.add_argument("--dinov3-dropout", type=float, default=0.0)
     parser.add_argument("--dinov3-train-backbone", action="store_true")
+    parser.add_argument("--dinov3-lora-enable", action="store_true", default=False)
+    parser.add_argument("--dinov3-lora-r", type=int, default=8)
+    parser.add_argument("--dinov3-lora-alpha", type=int, default=16)
+    parser.add_argument("--dinov3-lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--dinov3-lora-target-modules",
+        type=str,
+        nargs="+",
+        default=list(DEFAULT_LORA_TARGET_MODULES),
+    )
+    parser.add_argument("--dinov3-lora-bias", type=str, default="none")
+    parser.add_argument("--dinov3-lora-task-type", type=str, default="FEATURE_EXTRACTION")
+    parser.add_argument("--dinov3-lora-train-heads", action="store_true", default=True)
+    parser.add_argument("--no-dinov3-lora-train-heads", action="store_false", dest="dinov3_lora_train_heads")
+    parser.add_argument("--dinov3-lora-adapter-path", type=Path, default=None)
     parser.add_argument("--tokenbook-tokens", type=int, default=None)
     parser.add_argument("--tokenbook-dropout", type=float, default=0.0)
     parser.add_argument("--tokenbook-sample-rate", type=float, default=1.0)
@@ -277,6 +310,13 @@ def _build_model(args: argparse.Namespace) -> torch.nn.Module:
             tokenbook_sample_rate=args.tokenbook_sample_rate,
             tokenbook_ema_decay=args.tokenbook_ema_decay,
             tokenbook_use_ema=args.tokenbook_use_ema,
+            lora_enable=args.dinov3_lora_enable,
+            lora_r=args.dinov3_lora_r,
+            lora_alpha=args.dinov3_lora_alpha,
+            lora_dropout=args.dinov3_lora_dropout,
+            lora_target_modules=args.dinov3_lora_target_modules,
+            lora_bias=args.dinov3_lora_bias,
+            lora_task_type=args.dinov3_lora_task_type,
         )
     elif args.model == "segdino":
         model = SegDINOModel(
@@ -306,6 +346,13 @@ def _build_model(args: argparse.Namespace) -> torch.nn.Module:
             tokenbook_sample_rate=args.tokenbook_sample_rate,
             tokenbook_ema_decay=args.tokenbook_ema_decay,
             tokenbook_use_ema=args.tokenbook_use_ema,
+            lora_enable=args.dinov3_lora_enable,
+            lora_r=args.dinov3_lora_r,
+            lora_alpha=args.dinov3_lora_alpha,
+            lora_dropout=args.dinov3_lora_dropout,
+            lora_target_modules=args.dinov3_lora_target_modules,
+            lora_bias=args.dinov3_lora_bias,
+            lora_task_type=args.dinov3_lora_task_type,
         )
     elif args.model == "unet":
         model = UNet(in_channels=args.in_chans, num_classes=args.num_classes)
@@ -330,6 +377,29 @@ def _build_model(args: argparse.Namespace) -> torch.nn.Module:
             num_classes=args.num_classes,
         )
     return model
+
+
+def _configure_inference_lora(args: argparse.Namespace, model: torch.nn.Module) -> None:
+    if not args.dinov3_lora_enable and args.dinov3_lora_adapter_path is None:
+        print("LoRA enabled: False")
+        return
+    if args.model not in {"guidedino", "guidennwnet"}:
+        raise ValueError(
+            "LoRA inference options are currently supported only for --model guidedino or guidennwnet."
+        )
+    if args.dinov3_lora_enable and len(args.dinov3_lora_target_modules) == 0:
+        raise ValueError("--dinov3-lora-target-modules must be non-empty when LoRA is enabled.")
+    _ensure_peft_available()
+    guide_backbone = _guide_backbone_for_model(model)
+    if guide_backbone is None:
+        return
+    if args.dinov3_lora_adapter_path is not None:
+        guide_backbone.load_lora_adapter(args.dinov3_lora_adapter_path)
+    summary = guide_backbone.print_trainable_summary(prefix=f"{args.model}.guide_backbone")
+    print(f"LoRA enabled: {bool(args.dinov3_lora_enable)}")
+    if args.dinov3_lora_enable:
+        print(f"LoRA requested target modules: {list(args.dinov3_lora_target_modules)}")
+        print(f"LoRA effective target modules: {summary['lora_target_modules_effective']}")
 
 
 def _predict_image(
@@ -467,6 +537,8 @@ def main() -> None:
         raise ValueError("--gaussian-sigma-scale must be > 0.")
     if args.gaussian_value_scaling <= 0:
         raise ValueError("--gaussian-value-scaling must be > 0.")
+    if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
+        raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
 
     if args.synapse_root is not None:
         if args.num_classes == 1:
@@ -496,6 +568,7 @@ def main() -> None:
     patch_size = _resolve_patch_size(args.patch_size)
 
     model = _build_model(args)
+    _configure_inference_lora(args, model)
     _load_checkpoint(model, args.checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)

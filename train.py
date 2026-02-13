@@ -11,6 +11,7 @@ from pytorch_lightning.loggers import CSVLogger, WandbLogger
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 from data.segmentation import MedTokenSegmentationDataModule
+from model.dinov3_backbone import DEFAULT_LORA_TARGET_MODULES
 from model.swinunet import SwinUnet
 from model.unet import UNet
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
@@ -43,6 +44,63 @@ class ChannelsLastWrapper(torch.nn.Module):
 
 def _uses_imagenet_norm(seg_preprocess: str) -> bool:
     return seg_preprocess in {"dino", "dino_strong"}
+
+
+def _ensure_peft_available() -> None:
+    try:
+        import peft  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "LoRA was enabled but PEFT is not installed. Install with `pip install peft`."
+        ) from exc
+
+
+def _guide_backbone_for_model(model: torch.nn.Module):
+    if hasattr(model, "guide_backbone"):
+        return model.guide_backbone
+    if hasattr(model, "backbone"):
+        return model.backbone
+    return None
+
+
+def _configure_lora_training_policy(args: argparse.Namespace, model: torch.nn.Module) -> None:
+    if not args.dinov3_lora_enable:
+        return
+    if args.model not in {"guidedino", "guidennwnet"}:
+        return
+    guide_backbone = _guide_backbone_for_model(model)
+    if guide_backbone is None:
+        return
+    if args.dinov3_lora_adapter_path is not None:
+        guide_backbone.load_lora_adapter(args.dinov3_lora_adapter_path)
+    guide_backbone.enable_lora_training(
+        train_base_backbone=args.dinov3_train_backbone,
+        train_heads=args.dinov3_lora_train_heads,
+    )
+    if args.dinov3_lora_train_heads:
+        return
+    if args.model == "guidedino":
+        for param in model.decoder.parameters():
+            param.requires_grad = False
+    elif args.model == "guidennwnet":
+        for param in model.wnet.parameters():
+            param.requires_grad = False
+        for param in model.tokenbook.parameters():
+            param.requires_grad = False
+
+
+def _log_lora_startup(args: argparse.Namespace, model: torch.nn.Module) -> None:
+    print(f"LoRA enabled: {bool(args.dinov3_lora_enable)}")
+    if args.model not in {"guidedino", "guidennwnet"}:
+        return
+    guide_backbone = _guide_backbone_for_model(model)
+    if guide_backbone is None:
+        return
+    summary = guide_backbone.print_trainable_summary(prefix=f"{args.model}.guide_backbone")
+    if args.dinov3_lora_enable:
+        print(f"LoRA requested target modules: {list(args.dinov3_lora_target_modules)}")
+        print(f"LoRA effective target modules: {summary['lora_target_modules_effective']}")
+        print(f"LoRA train heads: {bool(args.dinov3_lora_train_heads)}")
 
 
 def build_criterion(args) -> torch.nn.Module:
@@ -168,6 +226,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-synapse-zscore", action="store_false", dest="synapse_zscore")
     parser.add_argument("--max-epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--lr-lora", type=float, default=None)
+    parser.add_argument("--lr-head", type=float, default=None)
+    parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=3e-5)
     parser.add_argument("--momentum", type=float, default=0.99)
     parser.add_argument("--no-nesterov", action="store_false", dest="nesterov", default=True)
@@ -266,6 +327,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov3-hidden-dim", type=int, default=256)
     parser.add_argument("--dinov3-dropout", type=float, default=0.0)
     parser.add_argument("--dinov3-train-backbone", action="store_true")
+    parser.add_argument("--dinov3-lora-enable", action="store_true", default=False)
+    parser.add_argument("--dinov3-lora-r", type=int, default=8)
+    parser.add_argument("--dinov3-lora-alpha", type=int, default=16)
+    parser.add_argument("--dinov3-lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--dinov3-lora-target-modules",
+        type=str,
+        nargs="+",
+        default=list(DEFAULT_LORA_TARGET_MODULES),
+    )
+    parser.add_argument("--dinov3-lora-bias", type=str, default="none")
+    parser.add_argument("--dinov3-lora-task-type", type=str, default="FEATURE_EXTRACTION")
+    parser.add_argument("--dinov3-lora-train-heads", action="store_true", default=True)
+    parser.add_argument("--no-dinov3-lora-train-heads", action="store_false", dest="dinov3_lora_train_heads")
+    parser.add_argument("--dinov3-lora-adapter-path", type=Path, default=None)
     parser.add_argument("--tokenbook-tokens", type=int, default=None)
     parser.add_argument("--tokenbook-dropout", type=float, default=0.0)
     parser.add_argument("--tokenbook-sample-rate", type=float, default=1.0)
@@ -299,6 +375,20 @@ def main() -> None:
         args.model = "guidedino"
         if args.loss in ("dc_bce", "dc_bce_hinged"):
             args.loss = "guide_dc_bce"
+    if args.dinov3_lora_enable:
+        if args.model not in {"guidedino", "guidennwnet"}:
+            raise ValueError(
+                "--dinov3-lora-enable is currently supported only for --model guidedino or guidennwnet."
+            )
+        if len(args.dinov3_lora_target_modules) == 0:
+            raise ValueError("--dinov3-lora-target-modules must be non-empty when LoRA is enabled.")
+        _ensure_peft_available()
+    for lr_name in ("lr", "lr_lora", "lr_head", "lr_backbone"):
+        lr_value = getattr(args, lr_name)
+        if lr_value is not None and lr_value <= 0:
+            raise ValueError(f"--{lr_name.replace('_', '-')} must be > 0.")
+    if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
+        raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
     if args.synapse_root is not None:
         if args.num_classes == 1:
             args.num_classes = 9
@@ -350,6 +440,13 @@ def main() -> None:
             tokenbook_sample_rate=args.tokenbook_sample_rate,
             tokenbook_ema_decay=args.tokenbook_ema_decay,
             tokenbook_use_ema=args.tokenbook_use_ema,
+            lora_enable=args.dinov3_lora_enable,
+            lora_r=args.dinov3_lora_r,
+            lora_alpha=args.dinov3_lora_alpha,
+            lora_dropout=args.dinov3_lora_dropout,
+            lora_target_modules=args.dinov3_lora_target_modules,
+            lora_bias=args.dinov3_lora_bias,
+            lora_task_type=args.dinov3_lora_task_type,
         )
     elif args.model == "segdino":
         model = SegDINOModel(
@@ -379,6 +476,13 @@ def main() -> None:
             tokenbook_sample_rate=args.tokenbook_sample_rate,
             tokenbook_ema_decay=args.tokenbook_ema_decay,
             tokenbook_use_ema=args.tokenbook_use_ema,
+            lora_enable=args.dinov3_lora_enable,
+            lora_r=args.dinov3_lora_r,
+            lora_alpha=args.dinov3_lora_alpha,
+            lora_dropout=args.dinov3_lora_dropout,
+            lora_target_modules=args.dinov3_lora_target_modules,
+            lora_bias=args.dinov3_lora_bias,
+            lora_task_type=args.dinov3_lora_task_type,
         )
     elif args.model == "unet":
         model = UNet(
@@ -405,6 +509,8 @@ def main() -> None:
             in_chans=args.in_chans,
             num_classes=args.num_classes,
         )
+    _configure_lora_training_policy(args, model)
+    _log_lora_startup(args, model)
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
         model = ChannelsLastWrapper(model)
@@ -429,6 +535,9 @@ def main() -> None:
         model=model,
         criterion=criterion,
         lr=args.lr,
+        lr_lora=args.lr_lora,
+        lr_head=args.lr_head,
+        lr_backbone=args.lr_backbone,
         weight_decay=args.weight_decay,
         momentum=args.momentum,
         nesterov=args.nesterov,
@@ -486,7 +595,7 @@ def main() -> None:
     )
 
     callbacks = [
-        ModelCheckpoint(monitor="val/loss", mode="min", save_top_k=3),
+        ModelCheckpoint(monitor="val/dice", mode="max", save_top_k=1),
         LearningRateMonitor(logging_interval="epoch"),
     ]
 

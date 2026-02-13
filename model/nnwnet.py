@@ -403,6 +403,13 @@ class GuideWNet2D(nn.Module):
         tokenbook_sample_rate: float = 1.0,
         tokenbook_ema_decay: float | None = None,
         tokenbook_use_ema: bool = False,
+        lora_enable: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: List[str] | Tuple[str, ...] | None = None,
+        lora_bias: str = "none",
+        lora_task_type: str = "FEATURE_EXTRACTION",
     ) -> None:
         super().__init__()
         self.guide_backbone_train = bool(guide_backbone_train)
@@ -420,6 +427,13 @@ class GuideWNet2D(nn.Module):
         self.guide_backbone = DINOv3BackboneWrapper(
             backbone=guide_backbone_name,
             train_backbone=guide_backbone_train,
+            lora_enable=lora_enable,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_bias=lora_bias,
+            lora_task_type=lora_task_type,
         )
 
         if tokenbook_tokens is None:
@@ -460,7 +474,8 @@ class GuideWNet2D(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor | List[torch.Tensor], torch.Tensor]:
         guide_input = self._guide_input(x)
-        if self.guide_backbone_train:
+        guide_backbone_needs_grad = self.guide_backbone_train or getattr(self.guide_backbone, "lora_enable", False)
+        if guide_backbone_needs_grad:
             guide_feat, _ = self.guide_backbone(guide_input)
         else:
             with torch.no_grad():

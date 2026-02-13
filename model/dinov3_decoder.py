@@ -278,11 +278,25 @@ class GuideDINOModel(nn.Module):
         tokenbook_sample_rate: float = 1.0,
         tokenbook_ema_decay: float | None = None,
         tokenbook_use_ema: bool = False,
+        lora_enable: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: List[str] | Tuple[str, ...] | None = None,
+        lora_bias: str = "none",
+        lora_task_type: str = "FEATURE_EXTRACTION",
     ):
         super().__init__()
         self.backbone = DINOv3BackboneWrapper(
             backbone=backbone_name,
             train_backbone=train_backbone,
+            lora_enable=lora_enable,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_bias=lora_bias,
+            lora_task_type=lora_task_type,
         )
         if tokenbook_tokens is None:
             if tokenbook_image_size is None:
