@@ -199,6 +199,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drive-root", type=Path, default=None)
     parser.add_argument("--kvasir-root", type=Path, default=None)
     parser.add_argument("--isic-root", type=Path, default=None)
+    parser.add_argument("--tn3k-root", type=Path, default=None)
     parser.add_argument("--synapse-root", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -217,6 +218,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drive-val-split", type=float, default=0.2)
     parser.add_argument("--kvasir-val-split", type=float, default=0.1)
     parser.add_argument("--isic-val-split", type=float, default=0.1)
+    parser.add_argument("--tn3k-val-split", type=float, default=0.0)
     parser.add_argument("--synapse-val-split", type=float, default=0.2)
     parser.add_argument("--synapse-include-empty", action="store_true", default=False)
     parser.add_argument("--synapse-to-rgb", action="store_true", default=False)
@@ -595,6 +597,7 @@ def main() -> None:
         drive_root=args.drive_root,
         kvasir_root=args.kvasir_root,
         isic_root=args.isic_root,
+        tn3k_root=args.tn3k_root,
         synapse_root=args.synapse_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -602,6 +605,7 @@ def main() -> None:
         drive_val_split=args.drive_val_split,
         kvasir_val_split=args.kvasir_val_split,
         isic_val_split=args.isic_val_split,
+        tn3k_val_split=args.tn3k_val_split,
         synapse_val_split=args.synapse_val_split,
         synapse_include_empty=args.synapse_include_empty,
         synapse_to_rgb=args.synapse_to_rgb,

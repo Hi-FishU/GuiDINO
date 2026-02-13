@@ -448,6 +448,50 @@ def discover_isic_samples(isic_root: str | Path) -> List[SegmentationSample]:
     return samples
 
 
+def discover_tn3k_samples(
+    tn3k_root: str | Path,
+    split: str = "trainval",
+) -> List[SegmentationSample]:
+    root = Path(tn3k_root)
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif"}
+    split_key = split.lower()
+    if split_key in {"train", "trainval"}:
+        image_dir = root / "trainval-image"
+        mask_dir = root / "trainval-mask"
+    elif split_key in {"val", "test"}:
+        image_dir = root / "test-image"
+        mask_dir = root / "test-mask"
+    else:
+        raise ValueError(f"Unsupported TN3K split: {split}. Use 'trainval' or 'test'.")
+
+    mask_by_stem: dict[str, Path] = {}
+    for mask_path in sorted(mask_dir.glob("*")):
+        if not mask_path.is_file():
+            continue
+        if mask_path.suffix.lower() not in allowed_suffixes:
+            continue
+        mask_by_stem[mask_path.stem] = mask_path
+
+    samples: List[SegmentationSample] = []
+    for image_path in sorted(image_dir.glob("*")):
+        if not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in allowed_suffixes:
+            continue
+        mask_path = mask_by_stem.get(image_path.stem)
+        if mask_path is None:
+            continue
+        samples.append(
+            SegmentationSample(
+                image_path=image_path,
+                mask_path=mask_path,
+                name=image_path.stem,
+                source="tn3k",
+            )
+        )
+    return samples
+
+
 def discover_synapse_volumes(synapse_root: str | Path) -> List[SynapseVolumeSample]:
     root = Path(synapse_root)
     image_dir = root / "averaged-training-images"
@@ -500,6 +544,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         drive_root: Optional[str] = None,
         kvasir_root: Optional[str] = None,
         isic_root: Optional[str] = None,
+        tn3k_root: Optional[str] = None,
         synapse_root: Optional[str] = None,
         batch_size: int = 4,
         num_workers: int = 4,
@@ -507,6 +552,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         drive_val_split: float = 0.2,
         kvasir_val_split: float = 0.1,
         isic_val_split: float = 0.1,
+        tn3k_val_split: float = 0.0,
         synapse_val_split: float = 0.2,
         synapse_include_empty: bool = False,
         synapse_to_rgb: bool = False,
@@ -528,6 +574,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.drive_root = drive_root
         self.kvasir_root = kvasir_root
         self.isic_root = isic_root
+        self.tn3k_root = tn3k_root
         self.synapse_root = synapse_root
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -535,6 +582,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.drive_val_split = drive_val_split
         self.kvasir_val_split = kvasir_val_split
         self.isic_val_split = isic_val_split
+        self.tn3k_val_split = tn3k_val_split
         self.synapse_val_split = synapse_val_split
         self.synapse_include_empty = synapse_include_empty
         self.synapse_to_rgb = synapse_to_rgb
@@ -552,11 +600,15 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.oversample_foreground_prob = float(oversample_foreground_prob)
         self.full_res_val_eval = bool(full_res_val_eval)
 
-        dataset_roots = [root is not None for root in (drive_root, kvasir_root, isic_root, synapse_root)]
+        dataset_roots = [root is not None for root in (drive_root, kvasir_root, isic_root, tn3k_root, synapse_root)]
         if sum(dataset_roots) == 0:
-            raise ValueError("At least one of drive_root, kvasir_root, isic_root, or synapse_root must be provided")
+            raise ValueError(
+                "At least one of drive_root, kvasir_root, isic_root, tn3k_root, or synapse_root must be provided"
+            )
         if sum(dataset_roots) > 1:
-            raise ValueError("Only one of drive_root, kvasir_root, isic_root, or synapse_root can be provided at a time")
+            raise ValueError(
+                "Only one of drive_root, kvasir_root, isic_root, tn3k_root, or synapse_root can be provided at a time"
+            )
 
     def setup(self, stage: Optional[str] = None):
         train_transform_size = self.patch_size if self.patch_size is not None else self.image_size
@@ -647,6 +699,39 @@ class MedTokenSegmentationDataModule(LightningDataModule):
                 val_datasets.append(
                     GenericSegmentationDataset(
                         isic_val,
+                        transform=val_transform,
+                        patch_size=None,
+                        oversample_foreground_prob=0.0,
+                    )
+                )
+
+        if self.tn3k_root is not None:
+            tn3k_trainval = discover_tn3k_samples(self.tn3k_root, split="trainval")
+            tn3k_test = discover_tn3k_samples(self.tn3k_root, split="test")
+
+            if tn3k_test:
+                test_case_names = {sample.name for sample in tn3k_test}
+                tn3k_train = [sample for sample in tn3k_trainval if sample.name not in test_case_names]
+                tn3k_val = tn3k_test
+            else:
+                tn3k_train, tn3k_val = _split_samples(tn3k_trainval, self.tn3k_val_split, seed)
+
+            if not tn3k_train and tn3k_trainval:
+                tn3k_train, tn3k_val = _split_samples(tn3k_trainval, self.tn3k_val_split, seed)
+
+            if tn3k_train:
+                train_datasets.append(
+                    GenericSegmentationDataset(
+                        tn3k_train,
+                        transform=train_transform,
+                        patch_size=self.patch_size,
+                        oversample_foreground_prob=self.oversample_foreground_prob,
+                    )
+                )
+            if tn3k_val:
+                val_datasets.append(
+                    GenericSegmentationDataset(
+                        tn3k_val,
                         transform=val_transform,
                         patch_size=None,
                         oversample_foreground_prob=0.0,

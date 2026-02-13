@@ -23,8 +23,14 @@ def _zscore_image(image: np.ndarray, **kwargs) -> np.ndarray:
     return (image - mean) / (std + 1e-8)
 
 
-def _shared_strong_augmentations(height: int, width: int):
-    return [
+def _shared_strong_augmentations(height: int, width: int, resize_first: bool = False):
+    ops = []
+    if resize_first:
+        # For high-resolution datasets, resizing first drastically reduces CPU cost
+        # for geometric/distortion transforms.
+        ops.append(A.Resize(height, width))
+
+    ops.extend([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.25),
@@ -46,8 +52,11 @@ def _shared_strong_augmentations(height: int, width: int):
             A.GaussianBlur(blur_limit=(3, 5), p=1.0),
             A.MedianBlur(blur_limit=3, p=1.0),
         ], p=0.1),
-        A.Resize(height, width),
-    ]
+    ])
+
+    if not resize_first:
+        ops.append(A.Resize(height, width))
+    return ops
 
 
 def get_train_transform():
@@ -152,7 +161,7 @@ def get_segmentation_train_transform_dino_strong(image_size=256):
     """
     height, width = _resolve_hw(image_size)
     return A.Compose([
-        *_shared_strong_augmentations(height, width),
+        *_shared_strong_augmentations(height, width, resize_first=True),
         A.Normalize(
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225),

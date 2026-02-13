@@ -211,4 +211,5 @@ wandb/
 outputs/
 checkpoints
 data_source
+data_cache
 try.ipynb

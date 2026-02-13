@@ -1,10 +1,9 @@
 cd /home/zhuonan/code/MedToken
-ISIC_ROOT="${ISIC_ROOT:-data_cache/ISIC_1024}"
 python train.py \
   --model guidedino \
-  --run-model guidino-isic \
+  --run-model guidino-tn3k \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
-  --isic-root "$ISIC_ROOT" \
+  --tn3k-root data_source/Thyoid/tn3k \
   --batch-size 4 \
   --max-epochs 400 \
   --num-workers 8 \

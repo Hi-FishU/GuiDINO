@@ -102,6 +102,34 @@ class SegmentationDataTests(unittest.TestCase):
             self.assertEqual(sample.name, "i1")
             self.assertEqual(sample.source, "isic")
 
+    def test_discover_tn3k_samples(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "tn3k"
+            train_img = root / "trainval-image"
+            train_mask = root / "trainval-mask"
+            test_img = root / "test-image"
+            test_mask = root / "test-mask"
+            train_img.mkdir(parents=True)
+            train_mask.mkdir(parents=True)
+            test_img.mkdir(parents=True)
+            test_mask.mkdir(parents=True)
+
+            _save_rgb(train_img / "0001.jpg", color=10)
+            _save_mask(train_mask / "0001.jpg", value=255)
+            _save_rgb(train_img / "0002.jpg", color=20)
+            _save_rgb(test_img / "1001.jpg", color=30)
+            _save_mask(test_mask / "1001.jpg", value=255)
+
+            train_samples = seg.discover_tn3k_samples(root, split="trainval")
+            test_samples = seg.discover_tn3k_samples(root, split="test")
+
+            self.assertEqual(len(train_samples), 1)
+            self.assertEqual(train_samples[0].name, "0001")
+            self.assertEqual(train_samples[0].source, "tn3k")
+            self.assertEqual(len(test_samples), 1)
+            self.assertEqual(test_samples[0].name, "1001")
+            self.assertEqual(test_samples[0].source, "tn3k")
+
     def test_split_samples_deterministic(self):
         samples = [
             seg.SegmentationSample(Path(f"img_{i}.png"), Path(f"mask_{i}.png"), f"name_{i}", "src")
