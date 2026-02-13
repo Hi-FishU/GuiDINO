@@ -13,7 +13,12 @@ from PIL import Image
 # Disable Albumentations online version check warnings in offline environments.
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
-from data.segmentation import discover_drive_samples, discover_kvasir_samples, discover_synapse_volumes
+from data.segmentation import (
+    discover_drive_samples,
+    discover_isic_samples,
+    discover_kvasir_samples,
+    discover_synapse_volumes,
+)
 from model.dinov3_backbone import DEFAULT_LORA_TARGET_MODULES
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
 from model.nnwnet import GuideWNet2D, WNet2D
@@ -53,6 +58,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--drive-root", type=Path, default=None)
     parser.add_argument("--drive-split", type=str, default="training", choices=["training", "test"])
     parser.add_argument("--kvasir-root", type=Path, default=None)
+    parser.add_argument("--isic-root", type=Path, default=None)
     parser.add_argument("--synapse-root", type=Path, default=None)
     parser.add_argument("--synapse-to-rgb", action="store_true", default=False)
     parser.add_argument("--synapse-target-spacing", type=float, nargs=3, default=None)
@@ -457,6 +463,10 @@ def _iter_image_paths(args: argparse.Namespace) -> Iterable[Tuple[Path, str]]:
         samples = discover_kvasir_samples(args.kvasir_root)
         for sample in samples:
             yield sample.image_path, "kvasir"
+    if args.isic_root is not None:
+        samples = discover_isic_samples(args.isic_root)
+        for sample in samples:
+            yield sample.image_path, "isic"
 
 
 def _infer_synapse(

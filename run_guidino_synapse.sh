@@ -14,4 +14,9 @@ python train.py \
   --seg-preprocess dino_strong \
   --tokenbook-dropout 0.8 \
   --tokenbook-sample-rate 0.5 \
-  --tokenbook-use-ema
+  --tokenbook-use-ema \
+  --profile-enable \
+  --profile-log-every-n-steps 20 \
+  --profile-warmup-steps 10 \
+  --no-train-epoch-eval
+

@@ -401,6 +401,53 @@ def discover_kvasir_samples(kvasir_root: str | Path) -> List[SegmentationSample]
     return samples
 
 
+def discover_isic_samples(isic_root: str | Path) -> List[SegmentationSample]:
+    root = Path(isic_root)
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif"}
+    layout_candidates = [
+        (root / "images", root / "masks"),
+        (root / "img", root / "label"),
+    ]
+    image_dir = root / "images"
+    mask_dir = root / "masks"
+    for candidate_image_dir, candidate_mask_dir in layout_candidates:
+        if candidate_image_dir.exists() and candidate_mask_dir.exists():
+            image_dir = candidate_image_dir
+            mask_dir = candidate_mask_dir
+            break
+
+    mask_by_stem: dict[str, Path] = {}
+    for mask_path in sorted(mask_dir.glob("*")):
+        if not mask_path.is_file():
+            continue
+        if mask_path.suffix.lower() not in allowed_suffixes:
+            continue
+        mask_stem = mask_path.stem
+        mask_by_stem[mask_stem] = mask_path
+        if mask_stem.endswith("_segmentation"):
+            base_stem = mask_stem[: -len("_segmentation")]
+            mask_by_stem.setdefault(base_stem, mask_path)
+
+    samples: List[SegmentationSample] = []
+    for image_path in sorted(image_dir.glob("*")):
+        if not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in allowed_suffixes:
+            continue
+        mask_path = mask_by_stem.get(image_path.stem)
+        if mask_path is None:
+            continue
+        samples.append(
+            SegmentationSample(
+                image_path=image_path,
+                mask_path=mask_path,
+                name=image_path.stem,
+                source="isic",
+            )
+        )
+    return samples
+
+
 def discover_synapse_volumes(synapse_root: str | Path) -> List[SynapseVolumeSample]:
     root = Path(synapse_root)
     image_dir = root / "averaged-training-images"
@@ -452,12 +499,14 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self,
         drive_root: Optional[str] = None,
         kvasir_root: Optional[str] = None,
+        isic_root: Optional[str] = None,
         synapse_root: Optional[str] = None,
         batch_size: int = 4,
         num_workers: int = 4,
         image_size: int | Tuple[int, int] = 512,
         drive_val_split: float = 0.2,
         kvasir_val_split: float = 0.1,
+        isic_val_split: float = 0.1,
         synapse_val_split: float = 0.2,
         synapse_include_empty: bool = False,
         synapse_to_rgb: bool = False,
@@ -469,6 +518,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         prefetch_factor: int = 2,
+        dataloader_mp_context: Optional[str] = None,
         preprocessing: str = "nnunet",
         patch_size: int | Tuple[int, int] | None = None,
         oversample_foreground_prob: float = 0.33,
@@ -477,12 +527,14 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         super().__init__()
         self.drive_root = drive_root
         self.kvasir_root = kvasir_root
+        self.isic_root = isic_root
         self.synapse_root = synapse_root
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.image_size = image_size
         self.drive_val_split = drive_val_split
         self.kvasir_val_split = kvasir_val_split
+        self.isic_val_split = isic_val_split
         self.synapse_val_split = synapse_val_split
         self.synapse_include_empty = synapse_include_empty
         self.synapse_to_rgb = synapse_to_rgb
@@ -494,16 +546,17 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers and num_workers > 0
         self.prefetch_factor = prefetch_factor
+        self.dataloader_mp_context = dataloader_mp_context
         self.preprocessing = preprocessing
         self.patch_size = patch_size
         self.oversample_foreground_prob = float(oversample_foreground_prob)
         self.full_res_val_eval = bool(full_res_val_eval)
 
-        dataset_roots = [root is not None for root in (drive_root, kvasir_root, synapse_root)]
+        dataset_roots = [root is not None for root in (drive_root, kvasir_root, isic_root, synapse_root)]
         if sum(dataset_roots) == 0:
-            raise ValueError("At least one of drive_root, kvasir_root, or synapse_root must be provided")
+            raise ValueError("At least one of drive_root, kvasir_root, isic_root, or synapse_root must be provided")
         if sum(dataset_roots) > 1:
-            raise ValueError("Only one of drive_root, kvasir_root, or synapse_root can be provided at a time")
+            raise ValueError("Only one of drive_root, kvasir_root, isic_root, or synapse_root can be provided at a time")
 
     def setup(self, stage: Optional[str] = None):
         train_transform_size = self.patch_size if self.patch_size is not None else self.image_size
@@ -578,6 +631,28 @@ class MedTokenSegmentationDataModule(LightningDataModule):
                     )
                 )
 
+        if self.isic_root is not None:
+            isic_samples = discover_isic_samples(self.isic_root)
+            isic_train, isic_val = _split_samples(isic_samples, self.isic_val_split, seed)
+            if isic_train:
+                train_datasets.append(
+                    GenericSegmentationDataset(
+                        isic_train,
+                        transform=train_transform,
+                        patch_size=self.patch_size,
+                        oversample_foreground_prob=self.oversample_foreground_prob,
+                    )
+                )
+            if isic_val:
+                val_datasets.append(
+                    GenericSegmentationDataset(
+                        isic_val,
+                        transform=val_transform,
+                        patch_size=None,
+                        oversample_foreground_prob=0.0,
+                    )
+                )
+
         if self.synapse_root is not None:
             synapse_volumes = discover_synapse_volumes(self.synapse_root)
             synapse_train, synapse_val = _split_samples(synapse_volumes, self.synapse_val_split, seed)
@@ -621,7 +696,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             self.val_dataset = val_datasets[0] if len(val_datasets) == 1 else ConcatDataset(val_datasets)
 
     def train_dataloader(self) -> DataLoader:
-        multiprocessing_context = "spawn" if self.num_workers > 0 else None
+        multiprocessing_context = self.dataloader_mp_context if self.num_workers > 0 else None
         prefetch_factor = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             self.train_dataset,
@@ -637,7 +712,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
     def val_dataloader(self) -> Optional[DataLoader]:
         if self.val_dataset is None:
             return None
-        multiprocessing_context = "spawn" if self.num_workers > 0 else None
+        multiprocessing_context = self.dataloader_mp_context if self.num_workers > 0 else None
         prefetch_factor = self.prefetch_factor if self.num_workers > 0 else None
         return DataLoader(
             self.val_dataset,

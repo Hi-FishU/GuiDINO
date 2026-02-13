@@ -16,6 +16,20 @@ python predict.py \
 	--mirror-tta
 ```
 
+### ISIC
+
+Expected layout: either `data_source/ISIC/images/*` + `data_source/ISIC/masks/*`, or `data_source/ISIC/img/*` + `data_source/ISIC/label/*` with matching filenames.
+
+```bash
+python predict.py \
+	--checkpoint outputs/logs/<run>/checkpoints/<ckpt>.ckpt \
+	--isic-root data_source/ISIC \
+	--model guidedino \
+	--patch-size 512 512 \
+	--overlap 0.5 \
+	--mirror-tta
+```
+
 ### DRIVE (test split)
 
 ```bash

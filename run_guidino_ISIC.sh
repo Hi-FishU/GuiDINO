@@ -1,10 +1,14 @@
 cd /home/zhuonan/code/MedToken
 python train.py \
-  --use-guide \
-  --run-model guidino-kvasir \
+  --model guidedino \
+  --run-model guidino-isic \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
-  --kvasir-root data_source/Kvasir \
-  --max-epochs 2000 \
+  --isic-root data_source/ISIC \
+  --batch-size 4 \
+  --max-epochs 400 \
+  --num-workers 8 \
+  --dataloader-mp-context fork \
+  --lr 1e-2 \
   --image-size 512 \
   --seg-preprocess dino_strong \
   --loss guide_dc_bce_hinged \
@@ -16,6 +20,4 @@ python train.py \
   --tokenbook-dropout 0.8 \
   --tokenbook-sample-rate 0.5 \
   --tokenbook-use-ema \
-  --profile-enable \
-  --profile-log-every-n-steps 20 \
-  --profile-warmup-steps 10
+  --no-train-epoch-eval

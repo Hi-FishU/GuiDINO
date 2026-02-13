@@ -198,6 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MedToken segmentation training")
     parser.add_argument("--drive-root", type=Path, default=None)
     parser.add_argument("--kvasir-root", type=Path, default=None)
+    parser.add_argument("--isic-root", type=Path, default=None)
     parser.add_argument("--synapse-root", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -215,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-sw-gaussian-value-scaling", type=float, default=10.0)
     parser.add_argument("--drive-val-split", type=float, default=0.2)
     parser.add_argument("--kvasir-val-split", type=float, default=0.1)
+    parser.add_argument("--isic-val-split", type=float, default=0.1)
     parser.add_argument("--synapse-val-split", type=float, default=0.2)
     parser.add_argument("--synapse-include-empty", action="store_true", default=False)
     parser.add_argument("--synapse-to-rgb", action="store_true", default=False)
@@ -315,10 +317,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-train-epoch-eval", action="store_false", dest="train_epoch_eval")
     parser.add_argument("--log-image-samples", type=int, default=0)
     parser.add_argument("--log-image-every-n-epochs", type=int, default=1)
+    parser.add_argument("--profile-enable", action="store_true", default=False)
+    parser.add_argument("--profile-log-every-n-steps", type=int, default=50)
+    parser.add_argument("--profile-warmup-steps", type=int, default=10)
+    parser.add_argument("--profile-sync-cuda", action="store_true", default=True)
+    parser.add_argument("--no-profile-sync-cuda", action="store_false", dest="profile_sync_cuda")
     parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument("--compile-mode", type=str, default="max-autotune")
     parser.add_argument("--compile-dynamic", action="store_true", default=False)
     parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument(
+        "--dataloader-mp-context",
+        choices=["default", "fork", "spawn", "forkserver"],
+        default="default",
+        help="Multiprocessing start method for DataLoader workers. 'default' uses the platform default.",
+    )
     parser.add_argument(
         "--dinov3-backbone",
         type=str,
@@ -387,6 +400,10 @@ def main() -> None:
         lr_value = getattr(args, lr_name)
         if lr_value is not None and lr_value <= 0:
             raise ValueError(f"--{lr_name.replace('_', '-')} must be > 0.")
+    if args.profile_log_every_n_steps <= 0:
+        raise ValueError("--profile-log-every-n-steps must be > 0.")
+    if args.profile_warmup_steps < 0:
+        raise ValueError("--profile-warmup-steps must be >= 0.")
     if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
         raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
     if args.synapse_root is not None:
@@ -568,17 +585,23 @@ def main() -> None:
         val_sw_gaussian_value_scaling=args.val_sw_gaussian_value_scaling,
         eval_keep_largest_component=args.eval_keep_largest_component,
         surface_metric_spacing=tuple(args.surface_metric_spacing) if args.surface_metric_spacing else None,
+        profile_enable=args.profile_enable,
+        profile_log_every_n_steps=args.profile_log_every_n_steps,
+        profile_warmup_steps=args.profile_warmup_steps,
+        profile_sync_cuda=args.profile_sync_cuda,
     )
 
     data_module = MedTokenSegmentationDataModule(
         drive_root=args.drive_root,
         kvasir_root=args.kvasir_root,
+        isic_root=args.isic_root,
         synapse_root=args.synapse_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         image_size=args.image_size,
         drive_val_split=args.drive_val_split,
         kvasir_val_split=args.kvasir_val_split,
+        isic_val_split=args.isic_val_split,
         synapse_val_split=args.synapse_val_split,
         synapse_include_empty=args.synapse_include_empty,
         synapse_to_rgb=args.synapse_to_rgb,
@@ -588,6 +611,7 @@ def main() -> None:
         synapse_zscore=args.synapse_zscore,
         seed=args.seed,
         prefetch_factor=args.prefetch_factor,
+        dataloader_mp_context=None if args.dataloader_mp_context == "default" else args.dataloader_mp_context,
         preprocessing=args.seg_preprocess,
         patch_size=tuple(args.patch_train_size) if args.patch_train_size else None,
         oversample_foreground_prob=args.oversample_foreground,

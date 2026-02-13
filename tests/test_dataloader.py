@@ -84,6 +84,24 @@ class SegmentationDataTests(unittest.TestCase):
             self.assertEqual(sample.name, "k1")
             self.assertEqual(sample.source, "kvasir")
 
+    def test_discover_isic_samples(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "isic"
+            image_dir = root / "images"
+            mask_dir = root / "masks"
+            image_dir.mkdir(parents=True)
+            mask_dir.mkdir(parents=True)
+
+            _save_rgb(image_dir / "i1.png", color=10)
+            _save_mask(mask_dir / "i1.png", value=255)
+            _save_rgb(image_dir / "i2.png", color=20)
+
+            samples = seg.discover_isic_samples(root)
+            self.assertEqual(len(samples), 1)
+            sample = samples[0]
+            self.assertEqual(sample.name, "i1")
+            self.assertEqual(sample.source, "isic")
+
     def test_split_samples_deterministic(self):
         samples = [
             seg.SegmentationSample(Path(f"img_{i}.png"), Path(f"mask_{i}.png"), f"name_{i}", "src")
