@@ -13,7 +13,7 @@ python train.py \
   --lr 1e-4 \
   --lr-lora 5e-4 \
   --lr-head 1e-4 \
-  --lr-scheduler cosine_restart
+  --lr-scheduler cosine_restart \
   --weight-decay 3e-5 \
   --dice-do-bg \
   --weight-guide 0.1 \

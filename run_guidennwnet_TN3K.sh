@@ -4,15 +4,15 @@ python train.py \
   --run-model guidennwnet-tn3k \
   --tn3k-root data_source/Thyoid/tn3k \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
-  --loss guide_dc_bce_hinged \
+  --loss guide_dc_bce \
   --image-size 512 \
   --batch-size 4 \
   --max-epochs 400 \
   --seg-preprocess dino_strong \
-  --optimizer AdamW \
-  --lr 1e-4 \
+  --optimizer sgd \
+  --lr 1e-2 \
   --lr-scheduler cosine \
-  --weight-decay 1e-4 \
+  --weight-decay 3e-5 \
   --dice-do-bg \
   --weight-guide 0.1 \
   --tokenbook-sample-rate 1.0 \
