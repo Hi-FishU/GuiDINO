@@ -10,9 +10,8 @@ python train.py \
   --batch-size 4 \
   --max-epochs 400 \
   --seg-preprocess dino_strong \
-  --optimizer adamw \
+  --optimizer sgd \
   --lr 1e-2 \
-  --lr-scheduler cosine_restart \
   --weight-decay 3e-5 \
   --dice-do-bg \
   --weight-guide 0.1 \

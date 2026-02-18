@@ -319,11 +319,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-train-epoch-eval", action="store_false", dest="train_epoch_eval")
     parser.add_argument("--log-image-samples", type=int, default=0)
     parser.add_argument("--log-image-every-n-epochs", type=int, default=1)
-    parser.add_argument("--profile-enable", action="store_true", default=False)
-    parser.add_argument("--profile-log-every-n-steps", type=int, default=50)
-    parser.add_argument("--profile-warmup-steps", type=int, default=10)
-    parser.add_argument("--profile-sync-cuda", action="store_true", default=True)
-    parser.add_argument("--no-profile-sync-cuda", action="store_false", dest="profile_sync_cuda")
     parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument("--compile-mode", type=str, default="max-autotune")
     parser.add_argument("--compile-dynamic", action="store_true", default=False)
@@ -402,10 +397,6 @@ def main() -> None:
         lr_value = getattr(args, lr_name)
         if lr_value is not None and lr_value <= 0:
             raise ValueError(f"--{lr_name.replace('_', '-')} must be > 0.")
-    if args.profile_log_every_n_steps <= 0:
-        raise ValueError("--profile-log-every-n-steps must be > 0.")
-    if args.profile_warmup_steps < 0:
-        raise ValueError("--profile-warmup-steps must be >= 0.")
     if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
         raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
     if args.synapse_root is not None:
@@ -587,10 +578,6 @@ def main() -> None:
         val_sw_gaussian_value_scaling=args.val_sw_gaussian_value_scaling,
         eval_keep_largest_component=args.eval_keep_largest_component,
         surface_metric_spacing=tuple(args.surface_metric_spacing) if args.surface_metric_spacing else None,
-        profile_enable=args.profile_enable,
-        profile_log_every_n_steps=args.profile_log_every_n_steps,
-        profile_warmup_steps=args.profile_warmup_steps,
-        profile_sync_cuda=args.profile_sync_cuda,
     )
 
     data_module = MedTokenSegmentationDataModule(

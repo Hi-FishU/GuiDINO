@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import itertools
-import time
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -61,10 +59,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
         val_sw_gaussian_value_scaling: float = 10.0,
         eval_keep_largest_component: bool = False,
         surface_metric_spacing: Optional[Tuple[float, float]] = None,
-        profile_enable: bool = False,
-        profile_log_every_n_steps: int = 50,
-        profile_warmup_steps: int = 10,
-        profile_sync_cuda: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "criterion"])
@@ -104,19 +98,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.eval_keep_largest_component = bool(eval_keep_largest_component)
         self.surface_metric_spacing = surface_metric_spacing
         self._val_gaussian_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
-        self.profile_enable = bool(profile_enable)
-        self.profile_log_every_n_steps = max(int(profile_log_every_n_steps), 1)
-        self.profile_warmup_steps = max(int(profile_warmup_steps), 0)
-        self.profile_sync_cuda = bool(profile_sync_cuda)
-        self._profile_train_totals: Dict[str, float] = defaultdict(float)
-        self._profile_train_counts: Dict[str, int] = defaultdict(int)
-        self._profile_val_totals: Dict[str, float] = defaultdict(float)
-        self._profile_val_counts: Dict[str, int] = defaultdict(int)
-        self._profile_backward_start: Optional[float] = None
-        self._profile_optimizer_start: Optional[float] = None
-        self._profile_last_train_batch_end: Optional[float] = None
-        self._profile_train_batch_start: Optional[float] = None
-        self._profile_val_batch_start: Optional[float] = None
 
     def forward(self, images: torch.Tensor, targets: Optional[torch.Tensor] = None):
         if targets is not None:
@@ -128,12 +109,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
-        start_time = self._profile_time()
         outputs = self(images, targets)
-        self._profile_add("train_forward_s", self._profile_time() - start_time)
-        loss_start = self._profile_time()
         loss_dict, loss = self._compute_loss(outputs, targets)
-        self._profile_add("train_loss_s", self._profile_time() - loss_start)
         for name, value in loss_dict.items():
             if name == "loss":
                 continue
@@ -166,27 +143,15 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
-        step_start = self._profile_time()
         if self.val_use_sliding_window:
-            forward_start = self._profile_time()
             pred_masks = self._sliding_window_predict_batch(images)
-            self._profile_add("val_forward_s", self._profile_time() - forward_start)
-            loss_start = self._profile_time()
             loss_dict, loss = self._compute_loss(pred_masks, targets)
-            self._profile_add("val_loss_s", self._profile_time() - loss_start)
             outputs: Any = pred_masks
         else:
-            forward_start = self._profile_time()
             outputs = self(images, targets)
-            self._profile_add("val_forward_s", self._profile_time() - forward_start)
-            loss_start = self._profile_time()
             loss_dict, loss = self._compute_loss(outputs, targets)
-            self._profile_add("val_loss_s", self._profile_time() - loss_start)
             pred_masks = self._extract_pred_masks(outputs)
-        metrics_start = self._profile_time()
         metrics = self._compute_segmentation_metrics(pred_masks, targets)
-        self._profile_add("val_metrics_s", self._profile_time() - metrics_start)
-        self._profile_add("val_step_s", self._profile_time() - step_start)
 
         for name, value in loss_dict.items():
             if name == "loss":
@@ -231,7 +196,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self) -> None:
-        self._profile_log_epoch(split="val")
         if self.best_metric_name is None:
             return
         metric = self.trainer.callback_metrics.get(self.best_metric_name)
@@ -258,7 +222,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
             )
 
     def on_train_epoch_end(self) -> None:
-        self._profile_log_epoch(split="train")
         if not self.train_epoch_eval:
             return
         if self.trainer is None:
@@ -321,131 +284,6 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
         if was_training:
             self.model.train()
-
-    def on_train_epoch_start(self) -> None:
-        self._profile_train_totals.clear()
-        self._profile_train_counts.clear()
-        self._profile_last_train_batch_end = None
-        self._profile_train_batch_start = None
-
-    def on_validation_epoch_start(self) -> None:
-        self._profile_val_totals.clear()
-        self._profile_val_counts.clear()
-        self._profile_val_batch_start = None
-
-    def on_train_batch_start(self, batch: Any, batch_idx: int) -> None:
-        now = self._profile_time()
-        self._profile_train_batch_start = now
-        if self._profile_last_train_batch_end is not None:
-            self._profile_add("train_data_s", now - self._profile_last_train_batch_end)
-
-    def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int) -> None:
-        now = self._profile_time()
-        if self._profile_train_batch_start is not None:
-            self._profile_add("train_step_s", now - self._profile_train_batch_start)
-        self._profile_last_train_batch_end = now
-        self._profile_log_interval()
-
-    def on_validation_batch_start(
-        self, batch: Any, batch_idx: int, dataloader_idx: int = 0
-    ) -> None:
-        self._profile_val_batch_start = self._profile_time()
-
-    def on_validation_batch_end(
-        self, outputs: Any, batch: Any, batch_idx: int, dataloader_idx: int = 0
-    ) -> None:
-        now = self._profile_time()
-        if self._profile_val_batch_start is not None:
-            self._profile_add("val_step_total_s", now - self._profile_val_batch_start)
-
-    def on_before_backward(self, loss: torch.Tensor) -> None:
-        self._profile_backward_start = self._profile_time()
-
-    def on_after_backward(self) -> None:
-        if self._profile_backward_start is None:
-            return
-        self._profile_add("train_backward_s", self._profile_time() - self._profile_backward_start)
-        self._profile_backward_start = None
-
-    def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        self._profile_optimizer_start = self._profile_time()
-
-    def on_before_zero_grad(self, optimizer: torch.optim.Optimizer) -> None:
-        if self._profile_optimizer_start is None:
-            return
-        self._profile_add("train_optim_s", self._profile_time() - self._profile_optimizer_start)
-        self._profile_optimizer_start = None
-
-    def _profile_time(self) -> float:
-        if self.profile_enable and self.profile_sync_cuda and self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        return time.perf_counter()
-
-    def _profile_add(self, name: str, value_s: float) -> None:
-        if not self.profile_enable:
-            return
-        if self.global_step < self.profile_warmup_steps:
-            return
-        if value_s < 0:
-            return
-        if name.startswith("train_"):
-            self._profile_train_totals[name] += float(value_s)
-            self._profile_train_counts[name] += 1
-        elif name.startswith("val_"):
-            self._profile_val_totals[name] += float(value_s)
-            self._profile_val_counts[name] += 1
-
-    def _profile_log_interval(self) -> None:
-        if not self.profile_enable:
-            return
-        if self.global_step < self.profile_warmup_steps:
-            return
-        if self.global_step == 0 or self.global_step % self.profile_log_every_n_steps != 0:
-            return
-        payload: Dict[str, float] = {}
-        for name, total in self._profile_train_totals.items():
-            count = self._profile_train_counts.get(name, 0)
-            if count == 0:
-                continue
-            payload[f"profile/{name}_ms"] = (total / count) * 1000.0
-        if not payload:
-            return
-        self.log_dict(
-            {k: torch.as_tensor(v, device=self.device) for k, v in payload.items()},
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            logger=True,
-            sync_dist=False,
-        )
-
-    def _profile_log_epoch(self, split: str) -> None:
-        if not self.profile_enable:
-            return
-        if split == "train":
-            totals = self._profile_train_totals
-            counts = self._profile_train_counts
-        else:
-            totals = self._profile_val_totals
-            counts = self._profile_val_counts
-        payload: Dict[str, torch.Tensor] = {}
-        for name, total in totals.items():
-            count = counts.get(name, 0)
-            if count == 0:
-                continue
-            payload[f"profile_epoch/{name}_ms"] = torch.as_tensor(
-                (total / count) * 1000.0,
-                device=self.device,
-            )
-        if payload:
-            self.log_dict(
-                payload,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=False,
-            )
 
     def _resolve_train_eval_loader(self) -> Optional[DataLoader]:
         trainer = self.trainer
