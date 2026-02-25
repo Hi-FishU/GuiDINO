@@ -1,5 +1,5 @@
 cd /home/zhuonan/code/MedToken
-ISIC_ROOT="${ISIC_ROOT:-data_cache/ISIC_1024}"
+ISIC_ROOT="${ISIC_ROOT:-data_source/ISIC-2017}"
 python train.py \
   --model nnwnet \
   --run-model nnwnet-isic \

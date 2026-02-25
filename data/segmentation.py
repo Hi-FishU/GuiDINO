@@ -404,48 +404,87 @@ def discover_kvasir_samples(kvasir_root: str | Path) -> List[SegmentationSample]
 def discover_isic_samples(isic_root: str | Path) -> List[SegmentationSample]:
     root = Path(isic_root)
     allowed_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif"}
+    split_dirs = {
+        "train": (
+            root / "ISIC-2017_Training_Data",
+            root / "ISIC-2017_Training_Part1_GroundTruth",
+        ),
+        "val": (
+            root / "ISIC-2017_Validation_Data",
+            root / "ISIC-2017_Validation_Part1_GroundTruth",
+        ),
+    }
+
+    def _collect_samples(image_dir: Path, mask_dir: Path) -> List[SegmentationSample]:
+        mask_by_stem: dict[str, Path] = {}
+        for mask_path in sorted(mask_dir.glob("*")):
+            if not mask_path.is_file():
+                continue
+            if mask_path.suffix.lower() not in allowed_suffixes:
+                continue
+            mask_stem = mask_path.stem
+            mask_by_stem[mask_stem] = mask_path
+            if mask_stem.endswith("_segmentation"):
+                base_stem = mask_stem[: -len("_segmentation")]
+                mask_by_stem.setdefault(base_stem, mask_path)
+
+        samples: List[SegmentationSample] = []
+        for image_path in sorted(image_dir.glob("*")):
+            if not image_path.is_file():
+                continue
+            if image_path.suffix.lower() not in allowed_suffixes:
+                continue
+            mask_path = mask_by_stem.get(image_path.stem)
+            if mask_path is None:
+                continue
+            samples.append(
+                SegmentationSample(
+                    image_path=image_path,
+                    mask_path=mask_path,
+                    name=image_path.stem,
+                    source="isic",
+                )
+            )
+        return samples
+
+    # ISIC-2017 has predefined train/val folders; keep them fixed when present.
+    has_fixed_split = all(image_dir.exists() and mask_dir.exists() for image_dir, mask_dir in split_dirs.values())
+    if has_fixed_split:
+        train_samples = _collect_samples(*split_dirs["train"])
+        val_samples = _collect_samples(*split_dirs["val"])
+        return train_samples + val_samples
+
     layout_candidates = [
         (root / "images", root / "masks"),
         (root / "img", root / "label"),
     ]
-    image_dir = root / "images"
-    mask_dir = root / "masks"
     for candidate_image_dir, candidate_mask_dir in layout_candidates:
         if candidate_image_dir.exists() and candidate_mask_dir.exists():
-            image_dir = candidate_image_dir
-            mask_dir = candidate_mask_dir
-            break
+            return _collect_samples(candidate_image_dir, candidate_mask_dir)
+    return []
 
-    mask_by_stem: dict[str, Path] = {}
-    for mask_path in sorted(mask_dir.glob("*")):
-        if not mask_path.is_file():
-            continue
-        if mask_path.suffix.lower() not in allowed_suffixes:
-            continue
-        mask_stem = mask_path.stem
-        mask_by_stem[mask_stem] = mask_path
-        if mask_stem.endswith("_segmentation"):
-            base_stem = mask_stem[: -len("_segmentation")]
-            mask_by_stem.setdefault(base_stem, mask_path)
 
-    samples: List[SegmentationSample] = []
-    for image_path in sorted(image_dir.glob("*")):
-        if not image_path.is_file():
-            continue
-        if image_path.suffix.lower() not in allowed_suffixes:
-            continue
-        mask_path = mask_by_stem.get(image_path.stem)
-        if mask_path is None:
-            continue
-        samples.append(
-            SegmentationSample(
-                image_path=image_path,
-                mask_path=mask_path,
-                name=image_path.stem,
-                source="isic",
-            )
-        )
-    return samples
+def discover_isic_split_samples(
+    isic_root: str | Path,
+) -> Tuple[List[SegmentationSample], List[SegmentationSample]] | None:
+    root = Path(isic_root)
+    train_dirs = (
+        root / "ISIC-2017_Training_Data",
+        root / "ISIC-2017_Training_Part1_GroundTruth",
+    )
+    val_dirs = (
+        root / "ISIC-2017_Validation_Data",
+        root / "ISIC-2017_Validation_Part1_GroundTruth",
+    )
+    if not all(path.exists() for path in (*train_dirs, *val_dirs)):
+        return None
+
+    all_samples = discover_isic_samples(root)
+    train_names = {path.stem for path in train_dirs[0].glob("*") if path.is_file()}
+    val_names = {path.stem for path in val_dirs[0].glob("*") if path.is_file()}
+    train_samples = [sample for sample in all_samples if sample.name in train_names]
+    val_samples = [sample for sample in all_samples if sample.name in val_names]
+    return train_samples, val_samples
 
 
 def discover_tn3k_samples(
@@ -553,6 +592,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         kvasir_val_split: float = 0.1,
         isic_val_split: float = 0.1,
         tn3k_val_split: float = 0.0,
+        tn3k_use_test_as_val: bool = True,
         synapse_val_split: float = 0.2,
         synapse_include_empty: bool = False,
         synapse_to_rgb: bool = False,
@@ -583,6 +623,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
         self.kvasir_val_split = kvasir_val_split
         self.isic_val_split = isic_val_split
         self.tn3k_val_split = tn3k_val_split
+        self.tn3k_use_test_as_val = bool(tn3k_use_test_as_val)
         self.synapse_val_split = synapse_val_split
         self.synapse_include_empty = synapse_include_empty
         self.synapse_to_rgb = synapse_to_rgb
@@ -684,8 +725,12 @@ class MedTokenSegmentationDataModule(LightningDataModule):
                 )
 
         if self.isic_root is not None:
-            isic_samples = discover_isic_samples(self.isic_root)
-            isic_train, isic_val = _split_samples(isic_samples, self.isic_val_split, seed)
+            fixed_isic_splits = discover_isic_split_samples(self.isic_root)
+            if fixed_isic_splits is None:
+                isic_samples = discover_isic_samples(self.isic_root)
+                isic_train, isic_val = _split_samples(isic_samples, self.isic_val_split, seed)
+            else:
+                isic_train, isic_val = fixed_isic_splits
             if isic_train:
                 train_datasets.append(
                     GenericSegmentationDataset(
@@ -709,7 +754,7 @@ class MedTokenSegmentationDataModule(LightningDataModule):
             tn3k_trainval = discover_tn3k_samples(self.tn3k_root, split="trainval")
             tn3k_test = discover_tn3k_samples(self.tn3k_root, split="test")
 
-            if tn3k_test:
+            if self.tn3k_use_test_as_val and tn3k_test:
                 test_case_names = {sample.name for sample in tn3k_test}
                 tn3k_train = [sample for sample in tn3k_trainval if sample.name not in test_case_names]
                 tn3k_val = tn3k_test

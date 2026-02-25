@@ -1,21 +1,18 @@
 cd /home/zhuonan/code/MedToken
 python train.py \
-  --model guideunet \
-  --run-model guideunet-tn3k \
+  --model unet \
+  --run-model unet-tn3k \
   --tn3k-root data_source/Thyoid/tn3k \
   --tn3k-use-test-as-val \
-  --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
-  --loss guide_dc_bce \
+  --loss dc_bce \
   --image-size 352 \
   --batch-size 4 \
   --max-epochs 400 \
-  --seg-preprocess dino_strong \
+  --seg-preprocess nnunet \
   --optimizer adamw \
   --lr 1e-4 \
   --lr-scheduler poly \
   --weight-decay 1e-4 \
   --dice-do-bg \
   --weight-guide 0.1 \
-  --tokenbook-sample-rate 1.0 \
-  --tokenbook-dropout 0.0 \
   --no-train-epoch-eval

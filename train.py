@@ -15,6 +15,7 @@ from model.dinov3_backbone import DEFAULT_LORA_TARGET_MODULES
 from model.swinunet import SwinUnet
 from model.unet import UNet
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
+from model.nnunet import OfficialNNUNet2D
 from model.unet import GuideUNet
 from model.nnwnet import GuideWNet2D, WNet2D
 from model.wrapper import MedTokenSegLightningModule
@@ -207,8 +208,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-train-size", type=int, nargs="+", default=None)
     parser.add_argument("--val-sw-patch-size", type=int, nargs="+", default=None)
     parser.add_argument("--oversample-foreground", type=float, default=0.33)
-    parser.add_argument("--fullres-val-eval", action="store_true", default=True)
+    parser.add_argument("--fullres-val-eval", action="store_true", dest="fullres_val_eval")
     parser.add_argument("--no-fullres-val-eval", action="store_false", dest="fullres_val_eval")
+    parser.set_defaults(fullres_val_eval=None)
     parser.add_argument("--val-sw-overlap", type=float, default=0.5)
     parser.add_argument("--val-sw-mirror", action="store_true", default=True)
     parser.add_argument("--no-val-sw-mirror", action="store_false", dest="val_sw_mirror")
@@ -219,6 +221,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kvasir-val-split", type=float, default=0.1)
     parser.add_argument("--isic-val-split", type=float, default=0.1)
     parser.add_argument("--tn3k-val-split", type=float, default=0.0)
+    parser.add_argument("--tn3k-use-test-as-val", action="store_true", default=True)
+    parser.add_argument("--no-tn3k-use-test-as-val", action="store_false", dest="tn3k_use_test_as_val")
     parser.add_argument("--synapse-val-split", type=float, default=0.2)
     parser.add_argument("--synapse-include-empty", action="store_true", default=False)
     parser.add_argument("--synapse-to-rgb", action="store_true", default=False)
@@ -295,9 +299,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-model", type=str, default="smoke-test")
     parser.add_argument(
         "--model",
-        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnwnet", "guidennwnet"],
+        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnunet", "nnwnet", "guidennwnet"],
         default="swinunet",
         help="Backbone/decoder choice for segmentation.",
+    )
+    parser.add_argument("--nnunet-stages", type=int, default=6)
+    parser.add_argument("--nnunet-features-per-stage", type=int, nargs="+", default=None)
+    parser.add_argument("--nnunet-base-features", type=int, default=32)
+    parser.add_argument("--nnunet-max-features", type=int, default=512)
+    parser.add_argument(
+        "--nnunet-arch-class",
+        type=str,
+        default="dynamic_network_architectures.architectures.unet.ResidualEncoderUNet",
     )
     parser.add_argument("--nnwnet-deep-supervision", action="store_true", default=True)
     parser.add_argument("--no-nnwnet-deep-supervision", action="store_false", dest="nnwnet_deep_supervision")
@@ -319,9 +332,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-train-epoch-eval", action="store_false", dest="train_epoch_eval")
     parser.add_argument("--log-image-samples", type=int, default=0)
     parser.add_argument("--log-image-every-n-epochs", type=int, default=1)
+    parser.add_argument("--log-train-image-samples", type=int, default=0)
+    parser.add_argument("--log-train-image-every-n-epochs", type=int, default=1)
     parser.add_argument("--compile", action="store_true", default=False)
     parser.add_argument("--compile-mode", type=str, default="max-autotune")
     parser.add_argument("--compile-dynamic", action="store_true", default=False)
+    parser.add_argument("--check-val-every-n-epoch", type=int, default=1)
+    parser.add_argument("--limit-val-batches", type=float, default=1.0)
+    parser.add_argument("--num-sanity-val-steps", type=int, default=0)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument(
         "--dataloader-mp-context",
@@ -381,6 +399,12 @@ def main() -> None:
         )
     if not (0.0 <= args.val_sw_overlap < 1.0):
         raise ValueError("--val-sw-overlap must be in [0.0, 1.0).")
+    if args.check_val_every_n_epoch < 1:
+        raise ValueError("--check-val-every-n-epoch must be >= 1.")
+    if args.limit_val_batches < 0:
+        raise ValueError("--limit-val-batches must be >= 0.")
+    if args.num_sanity_val_steps < 0:
+        raise ValueError("--num-sanity-val-steps must be >= 0.")
     if args.use_guide:
         args.model = "guidedino"
         if args.loss in ("dc_bce", "dc_bce_hinged"):
@@ -399,6 +423,10 @@ def main() -> None:
             raise ValueError(f"--{lr_name.replace('_', '-')} must be > 0.")
     if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
         raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
+    if args.nnunet_stages < 2:
+        raise ValueError("--nnunet-stages must be >= 2.")
+    if args.nnunet_features_per_stage is not None and len(args.nnunet_features_per_stage) != args.nnunet_stages:
+        raise ValueError("--nnunet-features-per-stage must match --nnunet-stages.")
     if args.synapse_root is not None:
         if args.num_classes == 1:
             args.num_classes = 9
@@ -419,6 +447,15 @@ def main() -> None:
             )
         if args.loss in ("dc_bce", "dc_bce_hinged", "guide_dc_bce", "guide_dc_bce_hinged"):
             raise ValueError("Synapse is multi-class; use --loss dc_ce or dc_topk with num_classes > 1.")
+    if args.fullres_val_eval is None:
+        # Dataset-driven auto policy:
+        # TN3K defaults to fixed-size validation (SegDINO-style), others keep
+        # full-resolution sliding-window validation.
+        if args.tn3k_root is not None:
+            args.fullres_val_eval = False
+            print("Info: Auto-set --no-fullres-val-eval for TN3K.")
+        else:
+            args.fullres_val_eval = True
     pl.seed_everything(args.seed, workers=True)
     project = args.run_name
     name = args.run_model
@@ -466,6 +503,17 @@ def main() -> None:
             encoder_size=args.segdino_encoder_size,
             features=args.segdino_features,
             out_channels=args.segdino_out_channels,
+        )
+    elif args.model == "nnunet":
+        model = OfficialNNUNet2D(
+            in_channels=args.in_chans,
+            num_classes=args.num_classes,
+            deep_supervision=args.nnwnet_deep_supervision,
+            n_stages=args.nnunet_stages,
+            features_per_stage=args.nnunet_features_per_stage,
+            base_features=args.nnunet_base_features,
+            max_features=args.nnunet_max_features,
+            architecture_class_name=args.nnunet_arch_class,
         )
     elif args.model == "nnwnet":
         model = WNet2D(
@@ -567,6 +615,8 @@ def main() -> None:
         train_epoch_eval=args.train_epoch_eval,
         log_image_samples=args.log_image_samples,
         log_image_every_n_epochs=args.log_image_every_n_epochs,
+        log_train_image_samples=args.log_train_image_samples,
+        log_train_image_every_n_epochs=args.log_train_image_every_n_epochs,
         val_use_sliding_window=args.fullres_val_eval,
         val_sw_patch_size=tuple(args.val_sw_patch_size) if args.val_sw_patch_size else (
             tuple(args.patch_train_size) if args.patch_train_size else (args.image_size, args.image_size)
@@ -593,6 +643,7 @@ def main() -> None:
         kvasir_val_split=args.kvasir_val_split,
         isic_val_split=args.isic_val_split,
         tn3k_val_split=args.tn3k_val_split,
+        tn3k_use_test_as_val=args.tn3k_use_test_as_val,
         synapse_val_split=args.synapse_val_split,
         synapse_include_empty=args.synapse_include_empty,
         synapse_to_rgb=args.synapse_to_rgb,
@@ -631,6 +682,9 @@ def main() -> None:
         logger=[csv_logger, wandb_logger],
         log_every_n_steps=4,
         precision=precision,
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
+        limit_val_batches=args.limit_val_batches,
+        num_sanity_val_steps=args.num_sanity_val_steps,
     )
 
     trainer.fit(lightning_module, datamodule=data_module)

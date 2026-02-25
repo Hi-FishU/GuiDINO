@@ -50,6 +50,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
         train_epoch_eval: bool = True,
         log_image_samples: int = 0,
         log_image_every_n_epochs: int = 1,
+        log_train_image_samples: int = 0,
+        log_train_image_every_n_epochs: int = 1,
         val_use_sliding_window: bool = False,
         val_sw_patch_size: Tuple[int, int] = (512, 512),
         val_sw_overlap: float = 0.5,
@@ -87,6 +89,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
         self.train_epoch_eval = train_epoch_eval
         self.log_image_samples = int(log_image_samples)
         self.log_image_every_n_epochs = max(int(log_image_every_n_epochs), 1)
+        self.log_train_image_samples = int(log_train_image_samples)
+        self.log_train_image_every_n_epochs = max(int(log_train_image_every_n_epochs), 1)
         self.best_metric_value: Optional[float] = None
         self.val_use_sliding_window = bool(val_use_sliding_window)
         self.val_sw_patch_size = (int(val_sw_patch_size[0]), int(val_sw_patch_size[1]))
@@ -102,7 +106,7 @@ class MedTokenSegLightningModule(pl.LightningModule):
     def forward(self, images: torch.Tensor, targets: Optional[torch.Tensor] = None):
         if targets is not None:
             try:
-                return self.model(images, targets)
+                return self.model(images, targets=targets)
             except TypeError:
                 pass
         return self.model(images)
@@ -139,6 +143,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 prog_bar=True,
                 batch_size=images.size(0),
             )
+        if self._should_log_images(batch_idx, split="train"):
+            self._log_images(images, targets, outputs, split="train")
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -191,8 +197,8 @@ class MedTokenSegLightningModule(pl.LightningModule):
                 prog_bar=True,
                 batch_size=images.size(0),
             )
-        if self._should_log_images(batch_idx):
-            self._log_images(images, targets, outputs)
+        if self._should_log_images(batch_idx, split="val"):
+            self._log_images(images, targets, outputs, split="val")
         return loss
 
     def on_validation_epoch_end(self) -> None:
@@ -846,27 +852,49 @@ class MedTokenSegLightningModule(pl.LightningModule):
         asd = float(np.mean(all_distances))
         return hd95, asd
 
-    def _should_log_images(self, batch_idx: int) -> bool:
-        if self.log_image_samples <= 0:
+    def _should_log_images(self, batch_idx: int, split: str) -> bool:
+        if split == "train":
+            sample_count = self.log_train_image_samples
+            every_n_epochs = self.log_train_image_every_n_epochs
+        else:
+            sample_count = self.log_image_samples
+            every_n_epochs = self.log_image_every_n_epochs
+        if sample_count <= 0:
             return False
         if batch_idx != 0:
             return False
-        if (self.current_epoch % self.log_image_every_n_epochs) != 0:
+        if (self.current_epoch % every_n_epochs) != 0:
             return False
         if getattr(self, "global_rank", 0) != 0:
             return False
-        if self.trainer is None or self.trainer.logger is None:
+        if self._resolve_wandb_experiment() is None:
             return False
         return True
 
-    def _log_images(self, images: torch.Tensor, targets: torch.Tensor, outputs: Any) -> None:
+    def _resolve_wandb_experiment(self) -> Any:
+        if self.trainer is None:
+            return None
+        loggers = getattr(self.trainer, "loggers", None)
+        if loggers is None:
+            logger = getattr(self.trainer, "logger", None)
+            loggers = [logger] if logger is not None else []
+        for logger in loggers:
+            if logger is None:
+                continue
+            if "WandbLogger" not in logger.__class__.__name__:
+                continue
+            experiment = getattr(logger, "experiment", None)
+            if experiment is not None and hasattr(experiment, "log"):
+                return experiment
+        return None
+
+    def _log_images(self, images: torch.Tensor, targets: torch.Tensor, outputs: Any, split: str) -> None:
         try:
             import wandb
         except Exception:
             return
 
-        logger = self.trainer.logger
-        experiment = getattr(logger, "experiment", None)
+        experiment = self._resolve_wandb_experiment()
         if experiment is None:
             return
 
@@ -877,10 +905,15 @@ class MedTokenSegLightningModule(pl.LightningModule):
             guide_mask = outputs[1]
 
         batch_size = images.size(0)
-        num_samples = min(self.log_image_samples, batch_size)
+        if split == "train":
+            sample_count = self.log_train_image_samples
+        else:
+            sample_count = self.log_image_samples
+        num_samples = min(sample_count, batch_size)
         indices = torch.randperm(batch_size, device=images.device)[:num_samples]
 
-        logged = []
+        logged_images: List[Any] = []
+        logged_guides: List[Any] = []
         for i in indices.tolist():
             img = images[i].detach().float().cpu()
             if img.dim() == 3 and img.size(0) in (1, 3):
@@ -907,6 +940,7 @@ class MedTokenSegLightningModule(pl.LightningModule):
 
             caption = f"epoch {self.current_epoch} sample {i}"
             image = wandb.Image(img.numpy(), masks=masks, caption=caption)
+            logged_images.append(image)
 
             if guide_mask is not None:
                 guide = guide_mask[i].detach().float().cpu()
@@ -916,12 +950,10 @@ class MedTokenSegLightningModule(pl.LightningModule):
                     guide.numpy(),
                     caption=f"guide {caption}",
                 )
-                logged.append({"image": image, "guide": guide_img})
-            else:
-                logged.append({"image": image})
+                logged_guides.append(guide_img)
 
-        if logged:
-            experiment.log(
-                {"val/visuals": logged},
-                step=self.global_step,
-            )
+        if logged_images:
+            payload: Dict[str, Any] = {f"{split}/visuals": logged_images}
+            if logged_guides:
+                payload[f"{split}/guides"] = logged_guides
+            experiment.log(payload, step=self.global_step)

@@ -21,6 +21,7 @@ from data.segmentation import (
 )
 from model.dinov3_backbone import DEFAULT_LORA_TARGET_MODULES
 from model.dinov3_decoder import DINOv3SegmentationModel, GuideDINOModel, SegDINOModel
+from model.nnunet import OfficialNNUNet2D
 from model.nnwnet import GuideWNet2D, WNet2D
 from model.swinunet import SwinUnet
 from model.unet import GuideUNet, UNet
@@ -79,9 +80,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-classes", type=int, default=1)
     parser.add_argument(
         "--model",
-        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnwnet", "guidennwnet"],
+        choices=["swinunet", "unet", "guideunet", "dinov3", "segdino", "guidedino", "nnunet", "nnwnet", "guidennwnet"],
         default="swinunet",
     )
+    parser.add_argument("--nnunet-stages", type=int, default=6)
+    parser.add_argument("--nnunet-features-per-stage", type=int, nargs="+", default=None)
+    parser.add_argument("--nnunet-base-features", type=int, default=32)
+    parser.add_argument("--nnunet-max-features", type=int, default=512)
+    parser.add_argument(
+        "--nnunet-arch-class",
+        type=str,
+        default="dynamic_network_architectures.architectures.unet.ResidualEncoderUNet",
+    )
+    parser.add_argument("--nnunet-deep-supervision", action="store_true", default=False)
     parser.add_argument("--dinov3-backbone", type=str, default="facebook/dinov3-vit7b16-pretrain-lvd1689m")
     parser.add_argument("--dinov3-hidden-dim", type=int, default=256)
     parser.add_argument("--dinov3-dropout", type=float, default=0.0)
@@ -333,6 +344,17 @@ def _build_model(args: argparse.Namespace) -> torch.nn.Module:
             features=args.segdino_features,
             out_channels=args.segdino_out_channels,
         )
+    elif args.model == "nnunet":
+        model = OfficialNNUNet2D(
+            in_channels=args.in_chans,
+            num_classes=args.num_classes,
+            deep_supervision=args.nnunet_deep_supervision,
+            n_stages=args.nnunet_stages,
+            features_per_stage=args.nnunet_features_per_stage,
+            base_features=args.nnunet_base_features,
+            max_features=args.nnunet_max_features,
+            architecture_class_name=args.nnunet_arch_class,
+        )
     elif args.model == "nnwnet":
         model = WNet2D(
             in_channel=args.in_chans,
@@ -549,6 +571,10 @@ def main() -> None:
         raise ValueError("--gaussian-value-scaling must be > 0.")
     if args.dinov3_lora_adapter_path is not None and not args.dinov3_lora_enable:
         raise ValueError("--dinov3-lora-adapter-path requires --dinov3-lora-enable.")
+    if args.nnunet_stages < 2:
+        raise ValueError("--nnunet-stages must be >= 2.")
+    if args.nnunet_features_per_stage is not None and len(args.nnunet_features_per_stage) != args.nnunet_stages:
+        raise ValueError("--nnunet-features-per-stage must match --nnunet-stages.")
 
     if args.synapse_root is not None:
         if args.num_classes == 1:

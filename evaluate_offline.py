@@ -9,7 +9,12 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import binary_erosion, distance_transform_edt, label
 
-from data.segmentation import discover_drive_samples, discover_isic_samples, discover_kvasir_samples
+from data.segmentation import (
+    discover_drive_samples,
+    discover_isic_samples,
+    discover_kvasir_samples,
+    discover_tn3k_samples,
+)
 
 
 def _build_case_pairs(args: argparse.Namespace) -> List[Tuple[Path, Path]]:
@@ -28,6 +33,12 @@ def _build_case_pairs(args: argparse.Namespace) -> List[Tuple[Path, Path]]:
                 pairs.append((pred, s.mask_path))
     if args.isic_root is not None:
         samples = discover_isic_samples(args.isic_root)
+        for s in samples:
+            pred = args.pred_dir / f"{s.image_path.stem}{args.pred_suffix}"
+            if pred.exists():
+                pairs.append((pred, s.mask_path))
+    if args.tn3k_root is not None:
+        samples = discover_tn3k_samples(args.tn3k_root, split=args.tn3k_split)
         for s in samples:
             pred = args.pred_dir / f"{s.image_path.stem}{args.pred_suffix}"
             if pred.exists():
@@ -198,6 +209,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pred-suffix", type=str, default="_pred.png", help="Pred filename suffix.")
     parser.add_argument("--kvasir-root", type=Path, default=None)
     parser.add_argument("--isic-root", type=Path, default=None)
+    parser.add_argument("--tn3k-root", type=Path, default=None)
+    parser.add_argument("--tn3k-split", type=str, default="test", choices=["trainval", "test"])
     parser.add_argument("--drive-root", type=Path, default=None)
     parser.add_argument("--drive-split", type=str, default="training", choices=["training", "test"])
     parser.add_argument("--threshold", type=float, default=0.5)
@@ -212,8 +225,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.kvasir_root is None and args.drive_root is None and args.isic_root is None:
-        raise ValueError("Provide at least one dataset root: --kvasir-root, --isic-root, and/or --drive-root")
+    if args.kvasir_root is None and args.drive_root is None and args.isic_root is None and args.tn3k_root is None:
+        raise ValueError(
+            "Provide at least one dataset root: --kvasir-root, --isic-root, --tn3k-root, and/or --drive-root"
+        )
     pairs = _build_case_pairs(args)
 
     spacing = tuple(args.surface_metric_spacing) if args.surface_metric_spacing else None

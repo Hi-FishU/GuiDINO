@@ -3,6 +3,7 @@ python train.py \
   --model guidedino \
   --run-model guidedino-tn3k-lora \
   --tn3k-root data_source/Thyoid/tn3k \
+  --tn3k-use-test-as-val \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
   --loss guide_dc_bce \
   --image-size 512 \

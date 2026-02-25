@@ -1,7 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 cd /home/zhuonan/code/MedToken
+
 python train.py \
-  --model nnwnet \
-  --run-model nnwnet-tn3k \
+  --model nnunet \
+  --run-model nnunet-tn3k \
   --tn3k-root data_source/Thyoid/tn3k \
   --tn3k-use-test-as-val \
   --loss dc_bce \
@@ -14,5 +18,8 @@ python train.py \
   --lr-scheduler cosine \
   --weight-decay 3e-5 \
   --dice-do-bg \
+  --nnunet-stages 6 \
+  --nnunet-base-features 32 \
+  --nnunet-max-features 512 \
   --nnwnet-deep-supervision \
   --no-train-epoch-eval

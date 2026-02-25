@@ -1,7 +1,7 @@
 cd /home/zhuonan/code/MedToken
 python train.py \
   --model guidennwnet \
-  --run-model guidennwnet-kvasir-init \
+  --run-model guidennwnet-kvasir \
   --kvasir-root data_source/Kvasir \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
   --loss guide_dc_bce \
@@ -17,4 +17,6 @@ python train.py \
   --tokenbook-sample-rate 1.0 \
   --tokenbook-dropout 0.0 \
   --nnwnet-deep-supervision \
-  --no-train-epoch-eval
+  --no-train-epoch-eval \
+  --log-train-image-samples 4 \
+  --log-train-image-every-n-epochs 1

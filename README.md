@@ -1,5 +1,25 @@
 # MedToken
 
+## Official nnUNet v2 (TN3K)
+
+`run_nnunet_TN3K.sh` now follows the official nnUNet v2 pipeline:
+
+1. convert TN3K into `nnUNet_raw/DatasetXXX_*` layout
+2. run `nnUNetv2_plan_and_preprocess`
+3. run `nnUNetv2_train`
+4. run `nnUNetv2_predict` on `imagesTs`
+
+The conversion utility is `tools/prepare_nnunetv2_dataset.py` and can also be used for `kvasir` and `isic`.
+
+You can also use official nnUNet v2 architecture directly in MedToken training/inference via:
+
+```bash
+python train.py --model nnunet ...
+python predict.py --model nnunet --checkpoint <ckpt> ...
+```
+
+This model option lazy-loads official nnUNet modules and requires `nnunetv2` to be installed.
+
 ## Inference (nnUNet-style)
 
 Run sliding-window inference with Gaussian blending and optional mirroring/TTA using [predict.py](predict.py).
@@ -18,12 +38,14 @@ python predict.py \
 
 ### ISIC
 
-Expected layout: either `data_source/ISIC/images/*` + `data_source/ISIC/masks/*`, or `data_source/ISIC/img/*` + `data_source/ISIC/label/*` with matching filenames.
+Expected layout (recommended): `data_source/ISIC-2017/ISIC-2017_Training_Data`, `data_source/ISIC-2017/ISIC-2017_Training_Part1_GroundTruth`, `data_source/ISIC-2017/ISIC-2017_Validation_Data`, and `data_source/ISIC-2017/ISIC-2017_Validation_Part1_GroundTruth`.
+
+Fixed train/val split is used automatically for ISIC-2017. Legacy layouts are still supported: `images/*` + `masks/*`, or `img/*` + `label/*`.
 
 ```bash
 python predict.py \
 	--checkpoint outputs/logs/<run>/checkpoints/<ckpt>.ckpt \
-	--isic-root data_source/ISIC \
+	--isic-root data_source/ISIC-2017 \
 	--model guidedino \
 	--patch-size 512 512 \
 	--overlap 0.5 \
