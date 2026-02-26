@@ -3,16 +3,17 @@ python train.py \
   --use-guide \
   --run-model guidino-kvasir \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
-  --kvasir-root data_source/Kvasir \
-  --max-epochs 2000 \
+  --loss guide_dc_bce \
   --image-size 512 \
+  --batch-size 4 \
+  --max-epochs 400 \
   --seg-preprocess dino_strong \
-  --loss guide_dc_bce_hinged \
+  --optimizer sgd \
+  --lr 1e-2 \
+  --weight-decay 3e-5 \
+  --dice-do-bg \
   --weight-guide 0.1 \
-  --weight-hinge-d 0.05 \
-  --hinge-d-margin 1.0 \
-  --hinge-d-kernel-size 3 \
-  --lr-scheduler cosine_restart \
-  --tokenbook-dropout 0.8 \
-  --tokenbook-sample-rate 0.5 \
-  --tokenbook-use-ema
+  --tokenbook-sample-rate 1.0 \
+  --tokenbook-dropout 0.0 \
+  --nnwnet-deep-supervision \
+  --no-train-epoch-eval \

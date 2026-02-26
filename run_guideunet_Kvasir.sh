@@ -6,11 +6,15 @@ python train.py \
   --kvasir-root data_source/Kvasir \
   --loss guide_dc_bce \
   --image-size 512 \
+  --batch-size 4 \
+  --max-epochs 400 \
   --seg-preprocess dino_strong \
+  --optimizer sgd \
+  --lr 1e-2 \
+  --weight-decay 3e-5 \
+  --dice-do-bg \
   --weight-guide 0.1 \
-  --tokenbook-dropout 0.5 \
-  --tokenbook-sample-rate 0.5 \
-  --log-image-samples 2 \
-  --log-image-every-n-epochs 1 \
+  --tokenbook-sample-rate 1.0 \
+  --tokenbook-dropout 0.0 \
+  --nnwnet-deep-supervision \
   --no-train-epoch-eval \
-  --lr-scheduler cosine_restart

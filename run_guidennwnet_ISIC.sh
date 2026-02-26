@@ -28,4 +28,6 @@ python train.py \
   --check-val-every-n-epoch 5 \
   --limit-val-batches 0.25 \
   --num-sanity-val-steps 0 \
-  --no-train-epoch-eval
+  --no-train-epoch-eval \
+  --log-train-image-samples 4 \
+  --log-train-image-every-n-epochs 1

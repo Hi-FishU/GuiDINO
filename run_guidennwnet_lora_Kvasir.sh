@@ -10,7 +10,7 @@ python train.py \
   --max-epochs 400 \
   --seg-preprocess dino_strong \
   --optimizer adamw \
-  --lr 1e-4 \
+  --lr 1e-2 \
   --lr-lora 5e-4 \
   --lr-head 1e-4 \
   --weight-decay 3e-5 \

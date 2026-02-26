@@ -6,16 +6,16 @@ python train.py \
   --tn3k-use-test-as-val \
   --dinov3-backbone facebook/dinov3-vits16-pretrain-lvd1689m \
   --loss guide_dc_bce \
-  --image-size 512 \
+  --image-size 256 \
   --batch-size 4 \
   --max-epochs 400 \
   --seg-preprocess dino_strong \
   --optimizer adamw \
   --lr 1e-4 \
-  --lr-lora 5e-4 \
-  --lr-head 1e-4 \
-  --lr-scheduler cosine_restart \
-  --weight-decay 3e-5 \
+  --lr-lora 5e-6 \
+  --lr-head 1e-6 \
+  --lr-scheduler poly \
+  --weight-decay 1e-4 \
   --dice-do-bg \
   --weight-guide 0.1 \
   --tokenbook-sample-rate 1.0 \

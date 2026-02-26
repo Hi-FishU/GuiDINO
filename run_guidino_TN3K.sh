@@ -6,7 +6,7 @@ python train.py \
   --tn3k-root data_source/Thyoid/tn3k \
   --tn3k-use-test-as-val \
   --loss guide_dc_bce \
-  --image-size 352 \
+  --image-size 256 \
   --batch-size 4 \
   --max-epochs 400 \
   --seg-preprocess dino_strong \

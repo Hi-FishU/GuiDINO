@@ -19,4 +19,6 @@ python train.py \
   --tokenbook-sample-rate 1.0 \
   --tokenbook-dropout 0.0 \
   --nnwnet-deep-supervision \
-  --no-train-epoch-eval
+  --no-train-epoch-eval \
+  --log-train-image-samples 4 \
+  --log-train-image-every-n-epochs 1

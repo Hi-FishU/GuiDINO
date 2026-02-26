@@ -1,5 +1,6 @@
 cd /home/zhuonan/code/MedToken
 ISIC_ROOT="${ISIC_ROOT:-data_source/ISIC-2017}"
+NUM_WORKERS="${NUM_WORKERS:-12}"
 python train.py \
   --model guidedino \
   --run-model guidedino-isic-lora \
@@ -8,9 +9,9 @@ python train.py \
   --loss guide_dc_bce \
   --image-size 512 \
   --batch-size 4 \
-  --max-epochs 400 \
-  --num-workers 8 \
+  --num-workers "$NUM_WORKERS" \
   --dataloader-mp-context fork \
+  --max-epochs 400 \
   --seg-preprocess dino_strong \
   --optimizer adamw \
   --lr 1e-2 \
@@ -27,4 +28,4 @@ python train.py \
   --check-val-every-n-epoch 5 \
   --limit-val-batches 0.25 \
   --num-sanity-val-steps 0 \
-  --no-train-epoch-eval
+  --no-train-epoch-eval \
